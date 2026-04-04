@@ -1,0 +1,46 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  release:
+    name: Release ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target:
+          - x86_64-unknown-linux-gnu
+          - x86_64-pc-windows-msvc
+          - x86_64-apple-darwin
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cross-compilation tools
+        run: |
+          if [ "${{ matrix.target }}" != "x86_64-unknown-linux-gnu" ]; then
+            rustup target add ${{ matrix.target }}
+          fi
+
+      - name: Build release
+        run: |
+          if [ "${{ matrix.target }}" = "x86_64-unknown-linux-gnu" ]; then
+            cargo build --release --bin syn-proxy --bin syn
+          else
+            cargo build --release --bin syn-proxy --bin syn --target ${{ matrix.target }}
+          fi
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: synapse-${{ matrix.target }}
+          path: |
+            target/${{ matrix.target }}/release/syn-proxy*
+            target/${{ matrix.target }}/release/syn*
+

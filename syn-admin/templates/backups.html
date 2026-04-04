@@ -1,0 +1,196 @@
+{% extends "base.html" %}
+
+{% block title %}{{ title }}{% endblock %}
+{% block nav_backups %}active{% endblock %}
+{% block page_title %}Backup Management{% endblock %}
+
+{% block topbar_actions %}
+<button class="btn btn-primary" onclick="showCreateBackupModal()">+ New Backup</button>
+{% endblock %}
+
+{% block content %}
+<div class="card info-card">
+    <div class="info-item">
+        <span class="label">Next Scheduled Backup:</span>
+        <span class="value">{{ next_scheduled }}</span>
+    </div>
+</div>
+
+<div class="card">
+    <div class="card-header">
+        <h3>💾 Recovery Points</h3>
+    </div>
+    
+    <table class="data-table">
+        <thead>
+            <tr>
+                <th>ID</th>
+                <th>Type</th>
+                <th>Status</th>
+                <th>Size</th>
+                <th>Created</th>
+                <th>Actions</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% if backups.is_empty() %}
+            <tr>
+                <td colspan="6" class="empty-state">No backups found. Create your first backup to enable disaster recovery.</td>
+            </tr>
+            {% else %}
+            {% for backup in backups %}
+            <tr>
+                <td><code>{{ backup.id }}</code></td>
+                <td><span class="backup-type type-{{ backup.backup_type|lower }}">{{ backup.backup_type }}</span></td>
+                <td><span class="status status-{{ backup.status|lower }}">{{ backup.status }}</span></td>
+                <td>{{ backup.size }}</td>
+                <td>{{ backup.created_at }}</td>
+                <td>
+                    <button class="btn btn-sm" onclick="showBackupDetails('{{ backup.id }}')">Details</button>
+                    <button class="btn btn-sm btn-primary" onclick="restoreBackup('{{ backup.id }}')">Restore</button>
+                    <button class="btn btn-sm btn-danger" onclick="deleteBackup('{{ backup.id }}')">Delete</button>
+                </td>
+            </tr>
+            {% endfor %}
+            {% endif %}
+        </tbody>
+    </table>
+</div>
+
+<!-- Create Backup Modal -->
+<div id="create-backup-modal" class="modal hidden">
+    <div class="modal-content">
+        <h3>Create New Backup</h3>
+        <form id="create-backup-form">
+            <div class="form-group">
+                <label for="backup-type">Backup Type</label>
+                <select id="backup-type" name="backup_type">
+                    <option value="Incremental">Incremental (faster, smaller)</option>
+                    <option value="Full">Full (complete snapshot)</option>
+                    <option value="Differential">Differential (changes since last full)</option>
+                    <option value="Snapshot">Snapshot (point-in-time)</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label for="tenant-id">Tenant (optional)</label>
+                <input type="text" id="tenant-id" name="tenant_id" placeholder="Leave empty for all tenants">
+            </div>
+            <div class="form-actions">
+                <button type="button" class="btn" onclick="hideCreateBackupModal()">Cancel</button>
+                <button type="submit" class="btn btn-primary">Create Backup</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<!-- Backup Details Modal -->
+<div id="backup-details-modal" class="modal hidden">
+    <div class="modal-content">
+        <h3>Backup Details</h3>
+        <div id="backup-details-content"></div>
+        <div class="form-actions">
+            <button class="btn" onclick="hideBackupDetailsModal()">Close</button>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function showCreateBackupModal() {
+    document.getElementById('create-backup-modal').classList.remove('hidden');
+}
+
+function hideCreateBackupModal() {
+    document.getElementById('create-backup-modal').classList.add('hidden');
+}
+
+function hideBackupDetailsModal() {
+    document.getElementById('backup-details-modal').classList.add('hidden');
+}
+
+document.getElementById('create-backup-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const form = e.target;
+    const data = {
+        backup_type: form.backup_type.value,
+        tenant_id: form.tenant_id.value || null
+    };
+    
+    try {
+        const res = await fetch('/api/backups', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(data)
+        });
+        
+        if (res.ok) {
+            hideCreateBackupModal();
+            window.location.reload();
+        } else {
+            const err = await res.json();
+            alert('Error: ' + err.error.message);
+        }
+    } catch (e) {
+        alert('Error creating backup: ' + e.message);
+    }
+});
+
+async function showBackupDetails(id) {
+    const modal = document.getElementById('backup-details-modal');
+    const content = document.getElementById('backup-details-content');
+    
+    content.innerHTML = '<p class="loading">Loading...</p>';
+    modal.classList.remove('hidden');
+    
+    try {
+        const res = await fetch(`/api/backups/${id}`);
+        const data = await res.json();
+        
+        content.innerHTML = `
+            <div class="details-grid">
+                <div class="detail"><span class="label">ID:</span> <code>${data.id}</code></div>
+                <div class="detail"><span class="label">Type:</span> ${data.backup_type}</div>
+                <div class="detail"><span class="label">Status:</span> ${data.status}</div>
+                <div class="detail"><span class="label">Size:</span> ${data.size_human}</div>
+                <div class="detail"><span class="label">Objects:</span> ${data.object_count}</div>
+                <div class="detail"><span class="label">Created:</span> ${data.created_at}</div>
+                <div class="detail"><span class="label">Completed:</span> ${data.completed_at || 'In progress'}</div>
+                <div class="detail"><span class="label">Parent:</span> ${data.parent_id || 'None (full backup)'}</div>
+                <div class="detail"><span class="label">Checksum:</span> <code>${data.checksum || 'N/A'}</code></div>
+            </div>
+        `;
+    } catch (e) {
+        content.innerHTML = `<p class="error">Error: ${e.message}</p>`;
+    }
+}
+
+async function restoreBackup(id) {
+    if (!confirm('Are you sure you want to restore from this backup? This may overwrite current data.')) return;
+    
+    try {
+        const res = await fetch(`/api/backups/${id}/restore`, { method: 'POST' });
+        const data = await res.json();
+        alert(data.message);
+    } catch (e) {
+        alert('Error restoring backup: ' + e.message);
+    }
+}
+
+async function deleteBackup(id) {
+    if (!confirm('Are you sure you want to delete this backup?')) return;
+    
+    try {
+        const res = await fetch(`/api/backups/${id}`, { method: 'DELETE' });
+        if (res.ok) {
+            window.location.reload();
+        } else {
+            const err = await res.json();
+            alert('Error: ' + err.error.message);
+        }
+    } catch (e) {
+        alert('Error deleting backup: ' + e.message);
+    }
+}
+</script>
+{% endblock %}

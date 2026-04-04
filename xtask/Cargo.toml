@@ -1,0 +1,45 @@
+# =============================================================================
+# XTASK: Build Automation and Developer Tooling
+# =============================================================================
+# This crate provides build automation for the Synapse project, specifically:
+#
+# 1. Docker-based eBPF compilation for Windows/macOS developers
+# 2. Kernel binding generation via aya-tool
+# 3. Asset management (copying .o files to the right place)
+# 4. Release packaging
+#
+# WHY XTASK: The "cargo xtask" pattern provides a cross-platform way to run
+# complex build scripts without shell script portability issues.
+#
+# Usage:
+#   cargo xtask build-ebpf     # Build eBPF programs (Docker on non-Linux)
+#   cargo xtask codegen        # Generate kernel struct bindings
+#   cargo xtask dist           # Create release artifacts
+# =============================================================================
+
+[package]
+name = "xtask"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Build automation for Synapse"
+
+# This is a dev-only crate, not published
+publish = false
+
+[[bin]]
+name = "xtask"
+path = "src/main.rs"
+
+[dependencies]
+# CLI argument parsing
+clap = { version = "4.4", features = ["derive"] }
+
+# Error handling
+anyhow = "1.0"
+
+# Colored terminal output
+owo-colors = "4"
+
+# Which - find executables in PATH
+which = "6"

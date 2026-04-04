@@ -1,0 +1,71 @@
+# =============================================================================
+# Synapse - Build Artifacts & Generated Files
+# =============================================================================
+
+# Rust build artifacts
+/target/
+**/*.rs.bk
+Cargo.lock
+
+# IDE and editor
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS generated
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Debug and profiling
+*.pdb
+*.dSYM/
+perf.data
+perf.data.old
+flamegraph.svg
+
+# Coverage
+*.gcno
+*.gcda
+*.gcov
+coverage/
+tarpaulin-report.html
+
+# Documentation build
+/doc/
+
+# Environment files (may contain secrets)
+.env
+.env.local
+.env.*.local
+
+# Log files
+*.log
+logs/
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# Test artifacts
+test-results/
+
+# Benchmark artifacts
+criterion/
+
+# Fuzzing artifacts
+fuzz/artifacts/
+fuzz/corpus/
+
+# Platform-specific socket files
+*.sock
+
+# Lance storage files (development only)
+*.lance/

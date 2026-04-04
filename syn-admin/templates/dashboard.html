@@ -1,0 +1,161 @@
+{% extends "base.html" %}
+
+{% block title %}{{ title }}{% endblock %}
+{% block nav_dashboard %}active{% endblock %}
+{% block page_title %}Dashboard{% endblock %}
+
+{% block content %}
+<div class="dashboard-grid">
+    <!-- Status Cards -->
+    <div class="card status-card">
+        <div class="card-icon healthy">🟢</div>
+        <div class="card-content">
+            <h3>Cluster Health</h3>
+            <p class="big-number">{{ healthy_nodes }}/{{ total_nodes }}</p>
+            <span class="label">Healthy Nodes</span>
+        </div>
+    </div>
+    
+    <div class="card status-card">
+        <div class="card-icon">👥</div>
+        <div class="card-content">
+            <h3>Active Tenants</h3>
+            <p class="big-number">{{ active_tenants }}</p>
+            <span class="label">Total Tenants</span>
+        </div>
+    </div>
+    
+    <div class="card status-card">
+        <div class="card-icon">📈</div>
+        <div class="card-content">
+            <h3>Events Processed</h3>
+            <p class="big-number">{{ events_processed }}</p>
+            <span class="label">Total Events</span>
+        </div>
+    </div>
+    
+    <div class="card status-card">
+        <div class="card-icon">⏱️</div>
+        <div class="card-content">
+            <h3>Uptime</h3>
+            <p class="big-number">{{ uptime }}</p>
+            <span class="label">Server Uptime</span>
+        </div>
+    </div>
+</div>
+
+<!-- Cluster Status -->
+<div class="card">
+    <h3>🖥️ Cluster Nodes</h3>
+    <div id="cluster-status" hx-get="/api/cluster" hx-trigger="load, every {{ refresh_interval }}s" hx-swap="innerHTML">
+        <p class="loading">Loading cluster status...</p>
+    </div>
+</div>
+
+<!-- Recent Activity -->
+<div class="card">
+    <h3>📋 Recent Activity</h3>
+    <div id="recent-activity" hx-get="/api/audit?limit=10" hx-trigger="load, every {{ refresh_interval }}s" hx-swap="innerHTML">
+        <p class="loading">Loading recent activity...</p>
+    </div>
+</div>
+
+<!-- Metrics Chart Placeholder -->
+<div class="card">
+    <h3>📊 Metrics</h3>
+    <div id="metrics" hx-get="/api/metrics" hx-trigger="load, every {{ refresh_interval }}s" hx-swap="innerHTML">
+        <p class="loading">Loading metrics...</p>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+// Format cluster status response
+document.body.addEventListener('htmx:afterSwap', function(evt) {
+    if (evt.detail.target.id === 'cluster-status') {
+        try {
+            const data = JSON.parse(evt.detail.target.innerText);
+            evt.detail.target.innerHTML = formatClusterStatus(data);
+        } catch (e) {}
+    }
+    if (evt.detail.target.id === 'recent-activity') {
+        try {
+            const data = JSON.parse(evt.detail.target.innerText);
+            evt.detail.target.innerHTML = formatAuditLog(data);
+        } catch (e) {}
+    }
+    if (evt.detail.target.id === 'metrics') {
+        try {
+            const data = JSON.parse(evt.detail.target.innerText);
+            evt.detail.target.innerHTML = formatMetrics(data);
+        } catch (e) {}
+    }
+});
+
+function formatClusterStatus(data) {
+    let html = '<table class="data-table"><thead><tr><th>Node</th><th>Address</th><th>Status</th><th>Last Heartbeat</th></tr></thead><tbody>';
+    data.nodes.forEach(node => {
+        const statusClass = node.status === 'Healthy' ? 'status-healthy' : 'status-degraded';
+        html += `<tr>
+            <td>${node.id}</td>
+            <td>${node.address}</td>
+            <td><span class="status ${statusClass}">${node.status}</span></td>
+            <td>${new Date(node.last_heartbeat).toLocaleString()}</td>
+        </tr>`;
+    });
+    html += '</tbody></table>';
+    return html;
+}
+
+function formatAuditLog(data) {
+    if (!data.length) return '<p>No recent activity</p>';
+    let html = '<table class="data-table"><thead><tr><th>Time</th><th>Severity</th><th>Action</th><th>Description</th></tr></thead><tbody>';
+    data.slice(0, 10).forEach(entry => {
+        const severityClass = entry.severity.toLowerCase();
+        html += `<tr>
+            <td>${new Date(entry.timestamp).toLocaleString()}</td>
+            <td><span class="severity ${severityClass}">${entry.severity}</span></td>
+            <td>${entry.action}</td>
+            <td>${entry.description}</td>
+        </tr>`;
+    });
+    html += '</tbody></table>';
+    return html;
+}
+
+function formatMetrics(data) {
+    return `
+        <div class="metrics-grid">
+            <div class="metric">
+                <span class="metric-value">${data.events_per_second.toFixed(2)}</span>
+                <span class="metric-label">Events/sec</span>
+            </div>
+            <div class="metric">
+                <span class="metric-value">${data.active_connections}</span>
+                <span class="metric-label">Connections</span>
+            </div>
+            <div class="metric">
+                <span class="metric-value">${formatBytes(data.memory_bytes)}</span>
+                <span class="metric-label">Memory</span>
+            </div>
+            <div class="metric">
+                <span class="metric-value">${data.cpu_percent.toFixed(1)}%</span>
+                <span class="metric-label">CPU</span>
+            </div>
+            <div class="metric">
+                <span class="metric-value">${formatBytes(data.storage_bytes)}</span>
+                <span class="metric-label">Storage</span>
+            </div>
+        </div>
+    `;
+}
+
+function formatBytes(bytes) {
+    if (bytes >= 1073741824) return (bytes / 1073741824).toFixed(2) + ' GB';
+    if (bytes >= 1048576) return (bytes / 1048576).toFixed(2) + ' MB';
+    if (bytes >= 1024) return (bytes / 1024).toFixed(2) + ' KB';
+    return bytes + ' B';
+}
+</script>
+{% endblock %}

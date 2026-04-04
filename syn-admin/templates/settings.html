@@ -1,0 +1,132 @@
+{% extends "base.html" %}
+
+{% block title %}{{ title }}{% endblock %}
+{% block nav_settings %}active{% endblock %}
+{% block page_title %}Settings{% endblock %}
+
+{% block content %}
+<div class="card">
+    <h3>🔧 General Settings</h3>
+    <form id="settings-form">
+        <div class="form-group">
+            <label>Cluster Address</label>
+            <input type="text" value="{{ cluster_addr }}" disabled>
+            <span class="help-text">The address of the Synapse cluster</span>
+        </div>
+        
+        <div class="form-group">
+            <label>Authentication</label>
+            <div class="toggle-group">
+                <input type="checkbox" id="auth-enabled" {% if auth_enabled %}checked{% endif %}>
+                <label for="auth-enabled">Enable Authentication</label>
+            </div>
+            <span class="help-text">Require login to access admin UI</span>
+        </div>
+    </form>
+</div>
+
+<div class="card">
+    <h3>⚡ Rate Limiting</h3>
+    <div id="rate-limit-config" hx-get="/api/rate-limits" hx-trigger="load" hx-swap="innerHTML">
+        <p class="loading">Loading rate limit configuration...</p>
+    </div>
+</div>
+
+<div class="card">
+    <h3>📊 System Information</h3>
+    <div class="system-info">
+        <div class="info-row">
+            <span class="label">Version</span>
+            <span class="value">0.4.0 (Enterprise)</span>
+        </div>
+        <div class="info-row">
+            <span class="label">Rust Version</span>
+            <span class="value">1.75+</span>
+        </div>
+        <div class="info-row">
+            <span class="label">Build</span>
+            <span class="value">Release</span>
+        </div>
+    </div>
+</div>
+
+<div class="card danger-zone">
+    <h3>⚠️ Danger Zone</h3>
+    <div class="danger-actions">
+        <div class="danger-action">
+            <div class="danger-info">
+                <h4>Reset Audit Log</h4>
+                <p>Clear all audit entries. This action cannot be undone.</p>
+            </div>
+            <button class="btn btn-danger" onclick="confirmResetAudit()">Reset Audit Log</button>
+        </div>
+        <div class="danger-action">
+            <div class="danger-info">
+                <h4>Delete All Backups</h4>
+                <p>Remove all backup recovery points. This will disable disaster recovery.</p>
+            </div>
+            <button class="btn btn-danger" onclick="confirmDeleteBackups()">Delete All Backups</button>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+document.body.addEventListener('htmx:afterSwap', function(evt) {
+    if (evt.detail.target.id === 'rate-limit-config') {
+        try {
+            const data = JSON.parse(evt.detail.target.innerText);
+            evt.detail.target.innerHTML = formatRateLimitConfig(data);
+        } catch (e) {}
+    }
+});
+
+function formatRateLimitConfig(config) {
+    return `
+        <form id="rate-limit-form">
+            <div class="form-row">
+                <div class="form-group">
+                    <label>Global RPS</label>
+                    <input type="number" name="global_rps" value="${config.global_rps}">
+                </div>
+                <div class="form-group">
+                    <label>Default Tenant RPS</label>
+                    <input type="number" name="default_tenant_rps" value="${config.default_tenant_rps}">
+                </div>
+                <div class="form-group">
+                    <label>Default User RPS</label>
+                    <input type="number" name="default_user_rps" value="${config.default_user_rps}">
+                </div>
+            </div>
+            <div class="form-row">
+                <div class="form-group">
+                    <label>Burst Multiplier</label>
+                    <input type="number" step="0.1" name="burst_multiplier" value="${config.burst_multiplier}">
+                </div>
+                <div class="form-group">
+                    <label>Window Size (seconds)</label>
+                    <input type="number" name="window_size_secs" value="${config.window_size_secs}" disabled>
+                </div>
+                <div class="form-group">
+                    <label>Adaptive Limiting</label>
+                    <input type="checkbox" name="adaptive_enabled" ${config.adaptive_enabled ? 'checked' : ''} disabled>
+                </div>
+            </div>
+            <button type="submit" class="btn btn-primary">Save Changes</button>
+        </form>
+    `;
+}
+
+function confirmResetAudit() {
+    if (!confirm('Are you absolutely sure? This will delete ALL audit entries and cannot be undone.')) return;
+    if (!confirm('This is your last chance. Type "RESET" to confirm.')) return;
+    alert('Audit log reset not implemented in this demo.');
+}
+
+function confirmDeleteBackups() {
+    if (!confirm('Are you absolutely sure? This will delete ALL backups and cannot be undone.')) return;
+    alert('Backup deletion not implemented in this demo.');
+}
+</script>
+{% endblock %}

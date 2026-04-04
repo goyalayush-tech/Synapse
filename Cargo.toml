@@ -1,0 +1,142 @@
+# =============================================================================
+# SYNAPSE - Distributed Semantic Event Ledger
+# =============================================================================
+# The "Nervous System" for autonomous agents. Built for machines, not humans.
+#
+# Architecture: Hexagonal (Ports & Adapters) with trait-based abstractions
+# Philosophy: Zero-copy where it counts, type-safe everywhere, mockable by design
+# =============================================================================
+
+[workspace]
+resolver = "2"
+members = [
+    "syn-core",
+    "syn-proto",
+    "syn-proxy",
+    "syn-cli",
+    "syn-identity",
+    "syn-network",
+    "syn-memory",
+    "syn-policy",
+    "syn-admin",
+    "xtask",
+    # synapse-ebpf is built separately via xtask (requires bpf-linker)
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["Synapse Contributors"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/synapse-ai/synapse"
+rust-version = "1.75"
+
+[workspace.dependencies]
+# =============================================================================
+# Internal Crates
+# =============================================================================
+syn-core = { path = "./syn-core" }
+syn-proto = { path = "./syn-proto" }
+syn-identity = { path = "./syn-identity" }
+syn-network = { path = "./syn-network" }
+syn-memory = { path = "./syn-memory" }
+syn-policy = { path = "./syn-policy" }
+
+# =============================================================================
+# Asynchronous Runtime
+# -----------------------------------------------------------------------------
+# Using Tokio as primary runtime for cross-platform compatibility.
+# The work-stealing scheduler handles mixed I/O and CPU workloads efficiently.
+# For Linux perf optimization, tokio-uring can be added behind feature flags.
+# =============================================================================
+tokio = { version = "1.36", features = ["full"] }
+tokio-util = { version = "0.7", features = ["codec"] }
+async-trait = "0.1"
+
+# =============================================================================
+# Serialization & Data Handling
+# -----------------------------------------------------------------------------
+# Hybrid strategy:
+#   - Serde: Control plane (JSON config, CLI commands) - human readable
+#   - Rkyv:  Data plane (packet headers, IPC) - zero-copy, bare metal perf
+# =============================================================================
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+rkyv = { version = "0.7", features = ["validation"] }
+bytes = "1.5"
+
+# =============================================================================
+# CLI & Argument Parsing
+# -----------------------------------------------------------------------------
+# Clap with derive feature for type-safe, declarative CLI definition.
+# Env feature enables environment variable fallbacks for containerized deploys.
+# =============================================================================
+clap = { version = "4.4", features = ["derive", "env"] }
+
+# =============================================================================
+# Telemetry & Observability
+# -----------------------------------------------------------------------------
+# Tracing ecosystem for structured, async-aware logging.
+# JSON output format for log aggregation systems (ELK, Datadog, etc.)
+# =============================================================================
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# =============================================================================
+# Error Handling
+# -----------------------------------------------------------------------------
+# thiserror: Libraries define precise, matchable error enums
+# anyhow: Binaries consume errors with context chaining
+# =============================================================================
+thiserror = "1.0"
+anyhow = "1.0"
+
+# =============================================================================
+# Platform-Specific
+# -----------------------------------------------------------------------------
+# windows-sys: Raw Windows API bindings for Named Pipes, etc.
+# Only compiled on Windows targets.
+# =============================================================================
+windows-sys = { version = "0.52", features = ["Win32_System_Pipes", "Win32_Foundation"] }
+
+# =============================================================================
+# Optional Dependencies
+# -----------------------------------------------------------------------------
+# These dependencies are defined in individual crates as optional.
+# They are not included here because workspace dependencies cannot be optional.
+#
+# Optional dependencies by crate:
+#   - syn-identity: rustls, rustls-pemfile, x509-parser, aya
+#   - syn-network: quinn, http, tonic
+# =============================================================================
+
+# =============================================================================
+# Future Extensions
+# -----------------------------------------------------------------------------
+# lance = "0.39"           # Columnar storage with vector indices
+# wasmtime = "39.0"        # WebAssembly policy execution
+# candle-core = "0.8"      # Embedded ML for semantic embeddings
+# =============================================================================
+
+[workspace.lints.rust]
+unsafe_code = "warn"
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "warn"
+pedantic = { level = "warn", priority = -1 }
+
+# =============================================================================
+# Workspace Feature Flags
+# =============================================================================
+# Feature flags are organized by concern to enable modular compilation.
+# Test-only features (mocks) are isolated to prevent production leaks.
+#
+# Available features (defined in individual crates):
+#   - Serialization & Protocols: toon, mcp, a2a (in syn-proto)
+#   - Identity & Security: spiffe, ebpf (in syn-identity)
+#   - Network Transport: quic, grpc, http3, masque (in syn-network)
+#   - Memory & State: event-sourcing, graph, vector (in syn-memory)
+#   - Testing: mock-windows (in syn-proxy)
+# =============================================================================

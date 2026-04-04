@@ -1,0 +1,95 @@
+# =============================================================================
+# SYN-PROXY: The Asynchronous Proxy Engine
+# =============================================================================
+# The operational heart of Synapse. Leverages Tokio to manage thousands of
+# concurrent connections via non-blocking I/O with work-stealing scheduling.
+#
+# Architecture: Hexagonal (Ports & Adapters)
+#   - NetProvider trait abstracts OS-specific networking (Named Pipes, UDS)
+#   - WindowsMockProvider enables cross-platform development & testing
+# =============================================================================
+
+[package]
+name = "syn-proxy"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "High-performance async proxy engine for Synapse"
+
+[[bin]]
+name = "syn-proxy"
+path = "src/main.rs"
+
+[dependencies]
+# Internal crates
+syn-core = { workspace = true }
+syn-proto = { workspace = true }
+syn-identity = { workspace = true, optional = true }
+syn-network = { workspace = true, optional = true }
+syn-memory = { workspace = true, optional = true }
+
+# Async runtime - Tokio with work-stealing scheduler
+# Handles mixed I/O and CPU workloads efficiently across cores
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+
+# Trait objects for async methods (NetProvider abstraction)
+async-trait = { workspace = true }
+
+# Buffer management
+bytes = { workspace = true }
+
+# Error handling - binaries use anyhow for context chaining
+anyhow = { workspace = true }
+
+# Telemetry
+tracing = { workspace = true }
+
+# Serialization for control plane
+serde_json = { workspace = true }
+
+# UUID generation for event IDs
+uuid = { version = "1.0", features = ["v4"], optional = true }
+
+# Timestamps
+chrono = { version = "0.4", features = ["serde"], optional = true }
+
+[target.'cfg(windows)'.dependencies]
+# Windows-specific APIs for Named Pipes
+windows-sys = { workspace = true }
+
+[dev-dependencies]
+# For testing async code
+tokio-test = "0.4"
+
+[features]
+default = []
+# Enable mock Windows IPC for cross-platform development/testing
+mock-windows = []
+# SPIFFE identity integration
+spiffe = ["dep:syn-identity", "syn-identity/spiffe"]
+# QUIC transport support
+quic = ["dep:syn-network", "syn-network/quic"]
+# Event sourcing and memory
+memory = ["dep:syn-memory", "syn-memory/event-sourcing"]
+# Full Agentic Mesh features (v2.0)
+agentic-mesh = [
+    "dep:syn-identity",
+    "dep:syn-network", 
+    "dep:syn-memory",
+    "dep:uuid",
+    "dep:chrono",
+    "syn-memory/crdt",
+    "syn-memory/vector",
+    "syn-network/quic",
+]
+# Policy/governance engine
+policy = ["syn-policy"]
+
+[dependencies.syn-policy]
+workspace = true
+optional = true
+
+[lints]
+workspace = true

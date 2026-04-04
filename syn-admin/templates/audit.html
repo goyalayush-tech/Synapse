@@ -1,0 +1,159 @@
+{% extends "base.html" %}
+
+{% block title %}{{ title }}{% endblock %}
+{% block nav_audit %}active{% endblock %}
+{% block page_title %}Audit Log{% endblock %}
+
+{% block topbar_actions %}
+<button class="btn" onclick="verifyChain()">🔐 Verify Chain</button>
+<button class="btn btn-primary" onclick="exportLogs()">📥 Export</button>
+{% endblock %}
+
+{% block content %}
+<div class="card">
+    <div class="card-header">
+        <h3>📜 Audit Entries</h3>
+        <div class="card-stats">
+            <span class="stat">Total Entries: <strong>{{ total_entries }}</strong></span>
+            <span class="stat chain-status {% if chain_verified %}verified{% else %}unverified{% endif %}">
+                Chain: {% if chain_verified %}✅ Verified{% else %}⚠️ Unverified{% endif %}
+            </span>
+        </div>
+    </div>
+    
+    <div class="filters">
+        <select id="severity-filter">
+            <option value="">All Severities</option>
+            <option value="Debug">Debug</option>
+            <option value="Info">Info</option>
+            <option value="Warning">Warning</option>
+            <option value="Error">Error</option>
+            <option value="Critical">Critical</option>
+        </select>
+        <select id="category-filter">
+            <option value="">All Categories</option>
+            <option value="Authentication">Authentication</option>
+            <option value="Authorization">Authorization</option>
+            <option value="DataAccess">Data Access</option>
+            <option value="Configuration">Configuration</option>
+            <option value="System">System</option>
+        </select>
+        <button class="btn" onclick="applyFilters()">Apply</button>
+    </div>
+    
+    <div id="audit-log" hx-get="/api/audit?limit=50" hx-trigger="load" hx-swap="innerHTML">
+        <p class="loading">Loading audit entries...</p>
+    </div>
+</div>
+
+<!-- Verification Modal -->
+<div id="verify-modal" class="modal hidden">
+    <div class="modal-content">
+        <h3>🔐 Chain Verification</h3>
+        <div id="verify-result"></div>
+        <div class="form-actions">
+            <button class="btn" onclick="hideVerifyModal()">Close</button>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+document.body.addEventListener('htmx:afterSwap', function(evt) {
+    if (evt.detail.target.id === 'audit-log') {
+        try {
+            const data = JSON.parse(evt.detail.target.innerText);
+            evt.detail.target.innerHTML = formatAuditEntries(data);
+        } catch (e) {}
+    }
+});
+
+function formatAuditEntries(entries) {
+    if (!entries.length) return '<p class="empty-state">No audit entries found.</p>';
+    
+    let html = `<table class="data-table">
+        <thead>
+            <tr>
+                <th>Time</th>
+                <th>Severity</th>
+                <th>Category</th>
+                <th>Action</th>
+                <th>Description</th>
+                <th>Actor</th>
+                <th>Hash</th>
+            </tr>
+        </thead>
+        <tbody>`;
+    
+    entries.forEach(entry => {
+        html += `<tr>
+            <td>${new Date(entry.timestamp).toLocaleString()}</td>
+            <td><span class="severity ${entry.severity.toLowerCase()}">${entry.severity}</span></td>
+            <td>${entry.category}</td>
+            <td><code>${entry.action}</code></td>
+            <td>${entry.description}</td>
+            <td>${entry.actor || '-'}</td>
+            <td><code title="${entry.hash}">${entry.hash.substring(0, 12)}...</code></td>
+        </tr>`;
+    });
+    
+    html += '</tbody></table>';
+    return html;
+}
+
+async function verifyChain() {
+    const modal = document.getElementById('verify-modal');
+    const result = document.getElementById('verify-result');
+    
+    result.innerHTML = '<p class="loading">Verifying chain integrity...</p>';
+    modal.classList.remove('hidden');
+    
+    try {
+        const res = await fetch('/api/audit/verify', { method: 'POST' });
+        const data = await res.json();
+        
+        if (data.valid) {
+            result.innerHTML = `
+                <div class="success-message">
+                    <span class="icon">✅</span>
+                    <h4>Chain Verified</h4>
+                    <p>All ${data.entries_verified} entries verified successfully.</p>
+                    <p>The audit log has not been tampered with.</p>
+                </div>
+            `;
+        } else {
+            result.innerHTML = `
+                <div class="error-message">
+                    <span class="icon">❌</span>
+                    <h4>Verification Failed</h4>
+                    <p>${data.error}</p>
+                    <p>The audit chain may have been compromised.</p>
+                </div>
+            `;
+        }
+    } catch (e) {
+        result.innerHTML = `<p class="error">Error: ${e.message}</p>`;
+    }
+}
+
+function hideVerifyModal() {
+    document.getElementById('verify-modal').classList.add('hidden');
+}
+
+function applyFilters() {
+    const severity = document.getElementById('severity-filter').value;
+    const category = document.getElementById('category-filter').value;
+    
+    let url = '/api/audit?limit=50';
+    if (severity) url += `&severity=${severity}`;
+    if (category) url += `&category=${category}`;
+    
+    htmx.ajax('GET', url, '#audit-log');
+}
+
+async function exportLogs() {
+    window.open('/api/audit/export?limit=10000', '_blank');
+}
+</script>
+{% endblock %}

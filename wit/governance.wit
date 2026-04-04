@@ -1,0 +1,225 @@
+// =============================================================================
+// Synapse Governance WIT Interface
+// =============================================================================
+// This file defines the WebAssembly Interface Types (WIT) for the Synapse
+// governance layer. The WASM guest (policy module) uses these interfaces
+// to interact with the Synapse host (broker).
+//
+// Architecture:
+//   Host (Synapse Core) <-> Guest (Policy WASM)
+//
+// The host provides:
+//   - context-access: Query vector memory for semantic context
+//   - network-control: Authorize or block network connections
+//   - identity-access: Query trusted PIDs from eBPF maps
+//
+// The guest exports:
+//   - evaluate-event: Called when an event needs policy evaluation
+//
+// This follows the WebAssembly Component Model specification.
+// =============================================================================
+
+package synapse:governance@0.1.0;
+
+/// Context access interface - query semantic memory from WASM
+///
+/// This interface allows the policy module to search the Vector Memory
+/// (LanceDB) for relevant context before making decisions.
+interface context-access {
+    /// A search result from vector memory
+    record search-result {
+        /// Event ID
+        id: u64,
+        /// Source agent/process
+        source: string,
+        /// Action type
+        action: string,
+        /// Intent/reason
+        reason: string,
+        /// Relevance score (0.0 to 1.0)
+        score: f32,
+    }
+
+    /// Search vector memory for semantically similar events
+    ///
+    /// The host will:
+    /// 1. Generate an embedding for the query text
+    /// 2. Perform ANN search in LanceDB
+    /// 3. Return the top-k results
+    ///
+    /// # Arguments
+    /// * `query` - Natural language query
+    /// * `limit` - Maximum number of results
+    ///
+    /// # Returns
+    /// List of matching events with relevance scores
+    search-memory: func(query: string, limit: u32) -> list<search-result>;
+
+    /// Get a specific event by ID
+    get-event: func(id: u64) -> option<search-result>;
+
+    /// Get recent events (for temporal context)
+    get-recent: func(limit: u32) -> list<search-result>;
+
+    /// Get events by action type
+    get-by-action: func(action: string, limit: u32) -> list<search-result>;
+}
+
+/// Network control interface - authorize connections
+///
+/// This interface allows the policy module to control network access.
+/// The host enforces these decisions via eBPF cgroup_skb filters.
+interface network-control {
+    /// Connection request details
+    record connection-request {
+        /// Source process ID
+        pid: u32,
+        /// Destination IP address (IPv4 or IPv6)
+        dest-ip: string,
+        /// Destination port
+        dest-port: u16,
+        /// Protocol (tcp, udp)
+        protocol: string,
+    }
+
+    /// Authorization result
+    enum auth-result {
+        /// Allow the connection
+        allow,
+        /// Block the connection
+        deny,
+        /// Allow but log for audit
+        allow-with-audit,
+    }
+
+    /// Authorize a network connection
+    ///
+    /// Called by the host when a process attempts to connect.
+    /// The policy module should return a decision.
+    authorize-connection: func(request: connection-request) -> auth-result;
+
+    /// Get list of allowed destination patterns
+    get-allowed-destinations: func() -> list<string>;
+
+    /// Add a destination to the allowlist (runtime update)
+    add-allowed-destination: func(pattern: string) -> bool;
+}
+
+/// Identity access interface - query eBPF identity state
+///
+/// This interface allows the policy module to query the kernel-level
+/// identity state maintained by eBPF programs.
+interface identity-access {
+    /// Process identity information
+    record process-identity {
+        /// Process ID
+        pid: u32,
+        /// Parent process ID
+        ppid: u32,
+        /// Whether the process is trusted
+        trusted: bool,
+        /// Binary hash (SHA-256, hex encoded)
+        binary-hash: option<string>,
+        /// Cgroup path
+        cgroup-path: option<string>,
+    }
+
+    /// Check if a PID is trusted
+    is-trusted: func(pid: u32) -> bool;
+
+    /// Get full identity for a PID
+    get-identity: func(pid: u32) -> option<process-identity>;
+
+    /// Get all trusted PIDs
+    list-trusted: func() -> list<u32>;
+
+    /// Request attestation for a PID
+    /// Returns true if attestation succeeded and PID is now trusted
+    request-attestation: func(pid: u32) -> bool;
+}
+
+/// Logging interface for policy audit
+interface logging {
+    /// Log levels
+    enum log-level {
+        debug,
+        info,
+        warn,
+        error,
+    }
+
+    /// Log a message from the policy module
+    log: func(level: log-level, message: string);
+
+    /// Log a structured event for audit
+    audit: func(event-type: string, details: string);
+}
+
+/// The main policy engine world
+///
+/// This world defines what the host provides (imports) and what
+/// the guest must implement (exports).
+world policy-engine {
+    // Imports - provided by the Synapse host
+    import context-access;
+    import network-control;
+    import identity-access;
+    import logging;
+
+    /// Event to be evaluated by the policy
+    record policy-event {
+        /// Event type (fork, exec, connect, custom)
+        event-type: string,
+        /// Source process ID
+        source-pid: u32,
+        /// Serialized event payload (TOON format)
+        payload: list<u8>,
+        /// Timestamp (microseconds since epoch)
+        timestamp-us: u64,
+    }
+
+    /// Policy verdict
+    record verdict {
+        /// Whether to allow the event
+        allow: bool,
+        /// Reason for the decision
+        reason: string,
+        /// Optional transformation to apply
+        transform: option<string>,
+        /// Tags to add to the event
+        tags: list<string>,
+    }
+
+    /// Evaluate an event against the policy
+    ///
+    /// This is the main entry point called by the host when an event
+    /// occurs that requires policy evaluation (e.g., eBPF triggers).
+    ///
+    /// # Arguments
+    /// * `event` - The event to evaluate
+    ///
+    /// # Returns
+    /// Verdict with allow/deny decision and optional transformations
+    export evaluate-event: func(event: policy-event) -> verdict;
+
+    /// Initialize the policy module
+    ///
+    /// Called once when the module is loaded. Use this to set up
+    /// any internal state or caches.
+    export initialize: func() -> bool;
+
+    /// Get policy metadata
+    record policy-metadata {
+        /// Policy name
+        name: string,
+        /// Policy version
+        version: string,
+        /// Description
+        description: string,
+        /// Author
+        author: string,
+    }
+
+    /// Return metadata about this policy
+    export get-metadata: func() -> policy-metadata;
+}

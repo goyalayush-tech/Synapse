@@ -1,0 +1,23 @@
+# =============================================================================
+# Cargo Configuration for eBPF Target
+# =============================================================================
+# This configures the build to use bpf-linker for eBPF bytecode generation.
+# The target is bpfel-unknown-none (little-endian BPF, no OS).
+
+[build]
+target = "bpfel-unknown-none"
+
+[target.bpfel-unknown-none]
+# bpf-linker is a custom linker that generates eBPF bytecode
+# Install: cargo install bpf-linker
+linker = "bpf-linker"
+
+# Rustflags for eBPF compilation
+rustflags = [
+    # Disable frame pointers (not supported in eBPF)
+    "-C", "link-arg=--disable-memory-builtins",
+]
+
+[unstable]
+# Enable build-std to compile core for the eBPF target
+build-std = ["core"]

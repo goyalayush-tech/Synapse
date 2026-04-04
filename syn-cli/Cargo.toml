@@ -1,0 +1,49 @@
+# =============================================================================
+# SYN-CLI: Command and Control Interface
+# =============================================================================
+# The operator interface for Synapse. Communicates with the proxy daemon
+# via the control socket using the defined protocol.
+#
+# Powered by Clap for type-safe, declarative CLI definition with automatic
+# help generation and environment variable fallbacks.
+# =============================================================================
+
+[package]
+name = "syn-cli"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Command-line management interface for Synapse"
+
+[[bin]]
+name = "syn"
+path = "src/main.rs"
+
+[dependencies]
+# Internal crates
+syn-core = { workspace = true }
+syn-proto = { workspace = true }
+syn-memory = { workspace = true, features = ["event-sourcing"] }
+
+# CLI argument parsing - derive feature for declarative definition
+# env feature for containerized deployments (12-factor app style)
+clap = { workspace = true }
+
+# Async runtime for control socket communication
+tokio = { workspace = true }
+
+# Error handling - binaries use anyhow for context chaining
+anyhow = { workspace = true }
+
+# Telemetry
+tracing = { workspace = true }
+
+# Serialization for control commands
+serde_json = { workspace = true }
+
+# Time formatting for blame output
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+
+[lints]
+workspace = true

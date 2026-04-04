@@ -1,0 +1,58 @@
+# =============================================================================
+# SYN-ADMIN: Enterprise Admin Web UI
+# =============================================================================
+# Server-rendered admin dashboard for managing Synapse clusters.
+# Built with Axum for async HTTP and Askama for type-safe templates.
+# =============================================================================
+
+[package]
+name = "syn-admin"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Admin Web UI for Synapse cluster management"
+
+[[bin]]
+name = "syn-admin"
+path = "src/main.rs"
+
+[dependencies]
+# Internal crates
+syn-core = { workspace = true }
+syn-proto = { workspace = true }
+
+# WHY axum: Modern async web framework, tower-based, great ergonomics
+axum = { version = "0.7", features = ["macros", "ws"] }
+
+# WHY tower: Middleware ecosystem for rate limiting, compression, etc.
+tower = { version = "0.4", features = ["full"] }
+tower-http = { version = "0.5", features = ["fs", "cors", "compression-gzip", "trace"] }
+
+# WHY askama: Compile-time checked templates with Jinja2-like syntax
+askama = { version = "0.12", features = ["with-axum"] }
+askama_axum = "0.4"
+
+# Async runtime
+tokio = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+
+# Telemetry
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+# WHY chrono: Human-readable timestamps in UI
+chrono = { version = "0.4", features = ["serde"] }
+
+# WHY uuid: Request IDs and session tracking
+uuid = { version = "1.0", features = ["v4", "serde"] }
+
+[lints]
+workspace = true

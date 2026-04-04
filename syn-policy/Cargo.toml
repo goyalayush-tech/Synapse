@@ -1,0 +1,101 @@
+# =============================================================================
+# SYN-POLICY: Governance Policy Engine (WebAssembly Reflexes)
+# =============================================================================
+# Policy engine that runs governance logic as WebAssembly modules.
+#
+# WHY WASM: Governance policies need to be:
+#   - Fast: Sub-millisecond evaluation for inline stream processing
+#   - Safe: Sandboxed execution prevents policy bugs from crashing the broker
+#   - Portable: Same policy runs on any platform
+#   - Hot-reloadable: Update policies without restarting the broker
+#
+# WHY WASMTIME: Rust-native, production-grade Wasm runtime with:
+#   - Cranelift JIT for fast execution
+#   - Fuel-based execution limits for DoS protection
+#   - Component model support for structured I/O
+# =============================================================================
+
+[package]
+name = "syn-policy"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "WebAssembly-based governance policy engine for Synapse"
+
+[dependencies]
+# Internal crates
+syn-core = { workspace = true }
+syn-proto = { workspace = true }
+
+# Async runtime
+tokio = { workspace = true }
+async-trait = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+
+# Telemetry
+tracing = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# WHY wasmtime: Production-grade Wasm runtime from the Bytecode Alliance
+# Cranelift JIT, fuel metering, component model support
+# WHY component-model: WIT-based structured host bindings for type-safe policy I/O
+wasmtime = { version = "22", optional = true, features = ["component-model"] }
+
+# WHY wat: WebAssembly Text Format parser for loading .wat policy files
+wat = { version = "1.209", optional = true }
+
+# WHY hashbrown: Faster HashMap for policy registry
+hashbrown = "0.14"
+
+# WHY parking_lot: Faster RwLock for policy registry and Cedar entity store
+parking_lot = { version = "0.12", optional = true }
+
+# WHY cedar-policy: Authorization language from AWS for fine-grained access control
+# Cedar provides: compile-time policy validation, RBAC/ABAC, fast evaluation
+# Used for Zero Trust governance - every agent action evaluated against Cedar policies
+cedar-policy = { version = "4", optional = true }
+
+# WHY aes-gcm: Authenticated encryption for encrypted WASM modules
+# Environmental Entanglement - policies only decrypt on trusted hosts
+aes-gcm = { version = "0.10", optional = true }
+
+# WHY sha2: Key derivation from eBPF attestation data (TRUSTED_PIDS hash)
+sha2 = { version = "0.10", optional = true }
+
+# WHY rkyv: Zero-copy deserialization for policy event data
+rkyv = { version = "0.7", optional = true, features = ["validation"] }
+
+# WHY hostname: Cross-platform machine identification for key derivation
+hostname = { version = "0.4", optional = true }
+
+# WHY notify: Cross-platform file system watching for policy hot-reload
+# Enables zero-downtime policy updates via inotify/FSEvents/ReadDirectoryChanges
+notify = { version = "6.1", optional = true }
+
+# WHY debounce: Debouncing for file system events (multiple saves → single reload)
+tokio-stream = { version = "0.1", optional = true }
+
+[features]
+default = ["wasm-lite"]
+# Full wasmtime integration with Component Model (requires wasmtime compilation)
+# Enables Environmental Entanglement via encrypted WASM + eBPF-derived keys
+wasm-full = ["dep:wasmtime", "dep:wat", "dep:aes-gcm", "dep:sha2", "dep:rkyv", "dep:hostname"]
+# Lightweight policy engine without wasmtime (for testing/dev)
+wasm-lite = []
+# Cedar policy engine for fine-grained authorization (Zero Trust governance)
+cedar = ["dep:cedar-policy", "dep:parking_lot"]
+# Hot-reload support for Cedar policies
+hot-reload = ["dep:notify", "dep:tokio-stream", "dep:parking_lot"]
+
+[dev-dependencies]
+tempfile = "3.14"
+
+[lints]
+workspace = true

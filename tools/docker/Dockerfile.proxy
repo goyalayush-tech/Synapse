@@ -1,0 +1,31 @@
+# Multi-stage Dockerfile for syn-proxy
+FROM rust:1.75 as builder
+
+WORKDIR /build
+
+# Copy workspace files
+COPY Cargo.toml Cargo.lock ./
+COPY syn-core ./syn-core
+COPY syn-proto ./syn-proto
+COPY syn-proxy ./syn-proxy
+COPY syn-cli ./syn-cli
+COPY syn-identity ./syn-identity
+COPY syn-network ./syn-network
+COPY syn-memory ./syn-memory
+
+# Build the proxy
+RUN cargo build --release --bin syn-proxy
+
+# Runtime stage
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /build/target/release/syn-proxy /usr/local/bin/syn-proxy
+
+EXPOSE 8080
+
+ENTRYPOINT ["/usr/local/bin/syn-proxy"]
+

@@ -1,0 +1,49 @@
+# =============================================================================
+# SYN-PROTO: Wire Formats & Protocol Definitions
+# =============================================================================
+# The grammar of the system - how components communicate.
+# Designed to be "pure" with minimal dependencies and no I/O logic.
+#
+# Serialization Strategy:
+#   - Serde (Control Plane): JSON for config, CLI commands - human readable
+#   - Rkyv (Data Plane): Zero-copy for packet headers - bare metal performance
+# =============================================================================
+
+[package]
+name = "syn-proto"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Wire protocol definitions and serialization for Synapse"
+
+[dependencies]
+# Control plane serialization - human readable formats
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { version = "0.8", optional = true }
+
+# Data plane serialization - zero-copy performance
+# Rkyv guarantees serialized representation == in-memory representation
+# "Deserialization" becomes a pointer cast with checksum validation
+rkyv = { workspace = true }
+
+# Buffer management for zero-copy operations
+bytes = { workspace = true }
+
+# Error definitions from core
+thiserror = { workspace = true }
+
+[features]
+default = []
+# TOON (Token-Oriented Object Notation) serialization for LLM efficiency
+toon = []
+# Model Context Protocol (MCP) support
+mcp = []
+# Agent2Agent (A2A) protocol support
+a2a = []
+# TOML serialization support
+toml = ["dep:toml"]
+
+[lints]
+workspace = true

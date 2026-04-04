@@ -1,0 +1,22 @@
+version: '3.8'
+
+services:
+  proxy:
+    build:
+      context: ../..
+      dockerfile: tools/docker/Dockerfile.proxy
+    ports:
+      - "8080:8080"
+    environment:
+      - SYNAPSE_MOCK=1
+    volumes:
+      - ./data:/data
+
+  cli:
+    build:
+      context: ../..
+      dockerfile: tools/docker/Dockerfile.cli
+    depends_on:
+      - proxy
+    command: ["status"]
+

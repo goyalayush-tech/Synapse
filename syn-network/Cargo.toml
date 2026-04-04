@@ -1,0 +1,64 @@
+# =============================================================================
+# SYN-NETWORK: Advanced Network Transport & Protocol Adapters
+# =============================================================================
+# QUIC transport, protocol adapters (MCP/A2A), and MASQUE tunnel support.
+# =============================================================================
+
+[package]
+name = "syn-network"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Advanced network transport and protocol adapters for Synapse"
+
+[dependencies]
+# Internal crates
+syn-core = { workspace = true }
+syn-proto = { workspace = true }
+
+# Async runtime
+tokio = { workspace = true }
+async-trait = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+
+# Telemetry
+tracing = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# QUIC transport
+quinn = { version = "0.11", optional = true }
+rustls = { version = "0.23", optional = true, default-features = false, features = ["ring", "std"] }
+
+# HTTP/3 support (via quinn)
+http = { version = "1.0", optional = true }
+
+# gRPC support (optional)
+tonic = { version = "0.11", optional = true, features = ["tls", "tls-roots"] }
+
+# Consistent hashing
+parking_lot = { version = "0.12", optional = true }
+siphasher = { version = "1.0", optional = true }
+
+[features]
+default = []
+# QUIC transport support
+quic = ["dep:quinn", "dep:rustls", "dep:http"]
+# gRPC protocol adapter
+grpc = ["dep:tonic"]
+# HTTP/3 support
+http3 = ["quic"]
+# MASQUE tunnel support
+masque = ["quic"]
+# Consistent hashing for horizontal scaling
+hash-ring = ["dep:parking_lot", "dep:siphasher"]
+
+[lints]
+workspace = true
+

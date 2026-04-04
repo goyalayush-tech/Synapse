@@ -1,0 +1,47 @@
+# =============================================================================
+# SYN-CORE: Domain Logic & Shared Infrastructure
+# =============================================================================
+# The foundational bedrock of the Synapse monorepo.
+# Contains types, traits, and utilities universally applicable across all crates.
+# =============================================================================
+
+[package]
+name = "syn-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Core domain types, error handling, and telemetry for Synapse"
+
+[dependencies]
+# Serialization - all domain types must be wire-compatible
+serde = { workspace = true }
+
+# Error handling - libraries use thiserror for precise, matchable errors
+thiserror = { workspace = true }
+
+# Telemetry - structured logging with async-aware spans
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+# WHY tokio: Async runtime for broadcast channels in Uncopyable Runtime
+tokio = { workspace = true, features = ["sync", "time", "fs", "io-util"] }
+
+# WHY parking_lot: Fast RwLock for metrics registry (Phase 8)
+parking_lot = "0.12"
+
+# WHY sha2: Cryptographic hashing for audit chain integrity (Phase 9 Enterprise)
+sha2 = "0.10"
+
+# WHY uuid: Unique identifiers for tenants, backups, audit entries (Phase 9 Enterprise)
+uuid = { version = "1.0", features = ["v4", "serde"] }
+
+# WHY chrono: Timestamp handling for audit logs, backups, retention (Phase 9 Enterprise)
+chrono = { version = "0.4", features = ["serde"] }
+
+# WHY libc: Low-level system calls for cgroup/user verification (Unix only)
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[lints]
+workspace = true

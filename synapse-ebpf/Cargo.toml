@@ -1,0 +1,67 @@
+# =============================================================================
+# SYNAPSE-EBPF: Kernel-Space eBPF Programs (The Uncopyable Root)
+# =============================================================================
+# This crate contains the eBPF programs that run in kernel space.
+# These programs implement Environmental Entanglement - binding the Synapse
+# binary to the verified execution environment.
+#
+# CRITICAL: This is a #![no_std] crate. It compiles to eBPF bytecode, NOT
+# native code. It requires the bpf-linker and aya-ebpf framework.
+#
+# Build Requirements:
+#   - Linux host OR Docker container (ghcr.io/aya-rs/aya-bpf-builder)
+#   - bpf-linker: cargo install bpf-linker
+#   - nightly Rust for eBPF target: rustup target add bpfel-unknown-none
+#
+# WHY SEPARATE CRATE: eBPF programs have fundamentally different constraints:
+#   - No std library (kernel has no libc)
+#   - No heap allocation (fixed stack size)
+#   - Limited loops (verifier requires bounded execution)
+#   - Different target triple (bpfel-unknown-none)
+# =============================================================================
+
+[package]
+name = "synapse-ebpf"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Kernel-space eBPF programs for Synapse identity attestation"
+
+# eBPF programs don't have tests in the traditional sense
+[[bin]]
+name = "synapse-ebpf"
+path = "src/main.rs"
+
+[dependencies]
+# WHY aya-ebpf: Pure Rust eBPF framework that generates verifier-compliant bytecode
+# No libbpf dependency, shares types with user-space aya crate
+aya-ebpf = "0.1"
+
+# WHY aya-log-ebpf: Logging from kernel space via perf ring buffer
+aya-log-ebpf = "0.1"
+
+# WHY network-types: Zero-copy network protocol parsing (Ethernet, IP, TCP headers)
+network-types = "0.0.7"
+
+[build-dependencies]
+# For generating kernel struct bindings
+# aya-tool generates bindings from vmlinux BTF
+
+[profile.dev]
+# eBPF programs must be optimized even in dev mode for verifier to accept
+opt-level = 3
+debug = false
+debug-assertions = false
+overflow-checks = false
+lto = true
+panic = "abort"
+incremental = false
+codegen-units = 1
+rpath = false
+
+[profile.release]
+opt-level = 3
+debug = false
+lto = true
+panic = "abort"
+codegen-units = 1

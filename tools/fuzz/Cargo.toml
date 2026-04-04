@@ -1,0 +1,13 @@
+[package]
+name = "synapse-fuzz"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[package.metadata.cargo-fuzz]
+binary = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+syn-proto = { path = "../../syn-proto", features = ["toon"] }
+

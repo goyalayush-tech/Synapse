@@ -1,0 +1,123 @@
+# =============================================================================
+# SYN-MEMORY: Event Sourcing, Knowledge Graph & Vector Memory
+# =============================================================================
+# Event store, knowledge graph, vector embeddings, and consensus protocols.
+#
+# WHY THIS CRATE: The "brain" of Synapse - semantic persistence where we store
+# "Intent" not just opaque bytes. Events become queryable knowledge.
+# =============================================================================
+
+[package]
+name = "syn-memory"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Event sourcing, knowledge graph, and vector memory for Synapse"
+
+[dependencies]
+# Internal crates
+syn-core = { workspace = true }
+syn-proto = { workspace = true }
+
+# Async runtime
+tokio = { workspace = true }
+async-trait = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+
+# Telemetry
+tracing = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Vector embeddings (optional)
+# WHY candle: Pure Rust ML framework, no Python dependency, perfect for embedded models
+candle-core = { version = "0.8", optional = true }
+candle-nn = { version = "0.8", optional = true }
+candle-transformers = { version = "0.8", optional = true }
+
+# Tokenizers for text preprocessing
+tokenizers = { version = "0.20", optional = true }
+
+# Model weight format
+# WHY safetensors: Memory-mapped, zero-copy model loading
+safetensors = { version = "0.4", optional = true }
+
+# Half-precision floats for quantized models
+half = { version = "2.4", optional = true }
+
+# HuggingFace Hub for model download
+hf-hub = { version = "0.3", optional = true }
+
+# Columnar storage dependencies (optional)
+# NOTE: Full Lance requires cmake/NASM on Windows. We use lance-lite feature
+# for a lightweight implementation compatible with the Lance API pattern.
+# For production, enable "lance-full" with proper build dependencies.
+
+# Arrow for columnar data representation
+arrow-array = { version = "54", optional = true }
+arrow-schema = { version = "54", optional = true }
+arrow = { version = "54", features = ["ffi"], optional = true }
+
+# Collections
+# WHY btree: Red-Black tree for MemTable hot path, O(log n) operations
+im = { version = "15.1", optional = true }
+
+# Temp files for tests
+tempfile = { version = "3.14", optional = true }
+
+# Zero-copy deserialization for WASM host-guest data sharing
+# WHY rkyv: Allows casting bytes directly to structs without parsing
+rkyv = { version = "0.7", features = ["validation"], optional = true }
+bytecheck = { version = "0.6", optional = true }
+
+# LanceDB integration for production deployments
+# NOTE: lancedb requires cmake and arrow-cpp build. Use lance-lite for dev.
+lancedb = { version = "0.13", optional = true }
+
+# Tokio for async channel in streaming ingestion
+tokio-stream = { version = "0.1", optional = true }
+
+# CRDT for hyper-state (live collaborative state)
+# WHY automerge: Conflict-free replicated data types for multi-agent blackboard pattern
+automerge = { version = "0.5", optional = true }
+
+# Graph database clients (optional)
+# neo4j-rs or dgraph clients would go here
+
+[features]
+default = []
+# Event sourcing support
+event-sourcing = []
+# Knowledge graph support
+graph = []
+# Vector memory support with Candle embeddings
+vector = ["dep:candle-core", "dep:candle-nn", "dep:candle-transformers", "dep:tokenizers", "dep:safetensors", "dep:half", "dep:hf-hub"]
+# Lance-lite: Lightweight columnar storage with Lance-compatible API
+# Uses BTreeMap memtable + JSON persistence (no cmake/NASM required)
+lance = ["dep:im", "dep:tempfile"]
+# Lance-full: Production LanceDB with IVF-PQ vector indices
+# Requires cmake, arrow-cpp build dependencies
+lance-full = [
+    "dep:lancedb",
+    "dep:arrow-array",
+    "dep:arrow-schema",
+    "dep:arrow",
+    "dep:im",
+    "dep:tokio-stream",
+    "dep:rkyv",
+    "dep:bytecheck",
+]
+# Zero-copy support for WASM host-guest data sharing
+zero-copy = ["dep:rkyv", "dep:bytecheck"]
+# CRDT hyper-state for multi-agent collaboration
+crdt = ["dep:automerge"]
+
+[lints]
+workspace = true
+

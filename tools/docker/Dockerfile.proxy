@@ -12,6 +12,9 @@ COPY syn-cli ./syn-cli
 COPY syn-identity ./syn-identity
 COPY syn-network ./syn-network
 COPY syn-memory ./syn-memory
+COPY syn-policy ./syn-policy
+COPY syn-admin ./syn-admin
+COPY xtask ./xtask
 
 # Build the proxy
 RUN cargo build --release --bin syn-proxy

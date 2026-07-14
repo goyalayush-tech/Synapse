@@ -69,4 +69,3 @@ pub use hash_ring::{
     ClusterNode, ConsistentRouter, HashRing, HashRingBuilder, HashRingConfig, HashRingError,
     HashRingResult, HashRingStats,
 };
-

@@ -34,6 +34,10 @@ bytes = { workspace = true }
 # Error definitions from core
 thiserror = { workspace = true }
 
+# WHY uuid: Unique, collision-resistant message IDs (e.g. A2A envelopes).
+# Version kept in sync with syn-core's direct `uuid` dependency.
+uuid = { version = "1.0", features = ["v4"] }
+
 [features]
 default = []
 # TOON (Token-Oriented Object Notation) serialization for LLM efficiency

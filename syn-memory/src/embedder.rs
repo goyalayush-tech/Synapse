@@ -229,6 +229,13 @@ impl Embedder {
         // For now, we create a simulated embedder
         let dimension = config.model_type.dimension();
 
+        tracing::warn!(
+            "Embedder is a deterministic hash-based placeholder, NOT a real semantic \
+             embedding model — embeddings are pseudo-random values derived from a text \
+             hash and carry no semantic meaning. For real semantic search, enable the \
+             `vector` feature and use `CandleEmbedder` instead."
+        );
+
         info!(
             "Embedder initialized: {} dimensions, normalize={}",
             dimension, config.normalize
@@ -419,8 +426,8 @@ pub mod candle_impl {
             debug!("Using device: {:?}", device);
 
             // Download model files
-            let api = Api::new()
-                .map_err(|e| EmbedderError::ModelLoad(format!("HF API error: {}", e)))?;
+            let api =
+                Api::new().map_err(|e| EmbedderError::ModelLoad(format!("HF API error: {}", e)))?;
             let repo = api.repo(Repo::new(model_id.to_string(), RepoType::Model));
 
             let tokenizer_file = repo
@@ -449,8 +456,9 @@ pub mod candle_impl {
                 .map_err(|e| EmbedderError::Tokenization(format!("Load tokenizer: {}", e)))?;
 
             // Load model config
-            let bert_config: BertConfig = serde_json::from_reader(std::fs::File::open(config_path)?)
-                .map_err(|e| EmbedderError::ModelLoad(format!("Parse config: {}", e)))?;
+            let bert_config: BertConfig =
+                serde_json::from_reader(std::fs::File::open(config_path)?)
+                    .map_err(|e| EmbedderError::ModelLoad(format!("Parse config: {}", e)))?;
 
             // Load weights using memory-mapped safetensors
             // WHY memory-map: Avoids loading entire model into RAM at startup

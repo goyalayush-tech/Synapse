@@ -205,19 +205,13 @@ impl A2AEnvelope {
 }
 
 /// Generates a unique message ID.
+///
+/// Backed by a UUIDv4 (RFC 4122), which draws from the OS CSPRNG. This
+/// avoids the collision risk of the previous approach, which hashed a
+/// nanosecond timestamp with `RandomState`/`DefaultHasher` and could produce
+/// duplicate IDs for messages generated within the same clock tick.
 fn generate_message_id() -> String {
-    use std::collections::hash_map::RandomState;
-    use std::hash::{BuildHasher, Hasher};
-    
-    let state = RandomState::new();
-    let mut hasher = state.build_hasher();
-    hasher.write_u64(
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos() as u64)
-            .unwrap_or(0),
-    );
-    format!("{:016x}", hasher.finish())
+    uuid::Uuid::new_v4().to_string()
 }
 
 #[cfg(test)]
@@ -226,14 +220,11 @@ mod tests {
 
     #[test]
     fn a2a_envelope_roundtrip() {
-        let envelope = A2AEnvelope::new(
-            "agent-1",
-            A2AMessage::Heartbeat,
-        );
+        let envelope = A2AEnvelope::new("agent-1", A2AMessage::Heartbeat);
 
         let json = envelope.to_json().unwrap();
         let recovered = A2AEnvelope::from_json(&json).unwrap();
-        
+
         assert_eq!(envelope.version, recovered.version);
         assert_eq!(envelope.source, recovered.source);
         assert_eq!(envelope.message, recovered.message);
@@ -250,13 +241,15 @@ mod tests {
 
         let json = envelope.to_json().unwrap();
         let recovered = A2AEnvelope::from_json(&json).unwrap();
-        
-        if let (A2AMessage::Discovery { capabilities: c1 }, A2AMessage::Discovery { capabilities: c2 }) = 
-            (envelope.message, recovered.message) {
+
+        if let (
+            A2AMessage::Discovery { capabilities: c1 },
+            A2AMessage::Discovery { capabilities: c2 },
+        ) = (envelope.message, recovered.message)
+        {
             assert_eq!(c1, c2);
         } else {
             panic!("Message type mismatch");
         }
     }
 }
-

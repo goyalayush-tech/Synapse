@@ -15,36 +15,66 @@
 //! dependencies. This ensures fast compilation and easy testing. All crates in the
 //! workspace depend on `syn-core`, but `syn-core` depends on none of them.
 
+pub mod enterprise;
 pub mod error;
 pub mod telemetry;
 pub mod types;
 pub mod uncopyable;
-pub mod enterprise;
 
 // Re-export primary types for ergonomic imports
 pub use error::{Result, SynapseError};
 pub use types::SessionId;
 pub use uncopyable::{
-    EbpfEvent, IntentRecord, PolicyVerdict, UncopyableConfig, UncopyableRuntime, RuntimeStats,
+    EbpfEvent, IntentRecord, PolicyVerdict, RuntimeStats, UncopyableConfig, UncopyableRuntime,
 };
 
 // Re-export enterprise types for convenience
 pub use enterprise::{
-    // Context and config
-    EnterpriseContext, EnterpriseConfig, EnterpriseError,
-    // Tenancy
-    TenantId, Tenant, TenantManager, TenantConfig, Namespace, ResourceQuota,
-    TenantTier, TenantStatus, TenantError, TenantResult,
+    AuditCategory,
+    AuditChain,
+    AuditConfig,
+    AuditEntry,
+    AuditError,
     // Audit
-    AuditEvent, AuditChain, AuditEntry, AuditSeverity, AuditCategory, AuditConfig,
-    AuditError, AuditResult,
-    // Rate limiting
-    RateLimiter, RateLimitConfig, RateLimitResult, TokenBucket, SlidingWindow,
-    QuotaManager, QuotaConfig,
-    // Geo-replication
-    GeoRegion, ReplicationConfig, ReplicationManager, ConflictResolver,
-    ReplicationError, ReplicationResult,
+    AuditEvent,
+    AuditResult,
+    AuditSeverity,
+    BackupConfig,
+    BackupError,
     // Backup
-    BackupManager, BackupConfig, BackupSchedule, RecoveryPoint, BackupType,
-    BackupError, BackupResult,
+    BackupManager,
+    BackupResult,
+    BackupSchedule,
+    BackupType,
+    ConflictResolver,
+    EnterpriseConfig,
+    // Context and config
+    EnterpriseContext,
+    EnterpriseError,
+    // Geo-replication
+    GeoRegion,
+    Namespace,
+    QuotaConfig,
+    QuotaManager,
+    RateLimitConfig,
+    RateLimitResult,
+    // Rate limiting
+    RateLimiter,
+    RecoveryPoint,
+    ReplicationConfig,
+    ReplicationError,
+    ReplicationManager,
+    ReplicationResult,
+    ResourceQuota,
+    SlidingWindow,
+    Tenant,
+    TenantConfig,
+    TenantError,
+    // Tenancy
+    TenantId,
+    TenantManager,
+    TenantResult,
+    TenantStatus,
+    TenantTier,
+    TokenBucket,
 };

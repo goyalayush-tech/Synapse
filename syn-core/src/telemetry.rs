@@ -32,9 +32,9 @@
 //! ```
 
 use crate::error::{Result, SynapseError};
-use std::sync::atomic::{AtomicU64, AtomicBool, Ordering};
-use std::sync::Arc;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
 use tracing_subscriber::{
     fmt::{self, format::FmtSpan},
     prelude::*,
@@ -176,7 +176,7 @@ impl MetricsRegistry {
         if let Some(histogram) = histograms.get(name) {
             histogram.sum.fetch_add(value, Ordering::Relaxed);
             histogram.count.fetch_add(1, Ordering::Relaxed);
-            
+
             // Find and increment appropriate bucket
             for (i, &bucket) in histogram.buckets.iter().enumerate() {
                 if value <= bucket {
@@ -193,10 +193,12 @@ impl MetricsRegistry {
         histograms.get(name).map(|h| {
             let count = h.count.load(Ordering::Relaxed);
             let sum = h.sum.load(Ordering::Relaxed);
-            let bucket_counts: Vec<u64> = h.bucket_counts.iter()
+            let bucket_counts: Vec<u64> = h
+                .bucket_counts
+                .iter()
                 .map(|c| c.load(Ordering::Relaxed))
                 .collect();
-            
+
             HistogramSummary {
                 count,
                 sum,
@@ -209,30 +211,41 @@ impl MetricsRegistry {
 
     /// Export all metrics as a snapshot
     pub fn snapshot(&self) -> MetricsSnapshot {
-        let counters: HashMap<String, u64> = self.counters.read()
-            .iter()
-            .map(|(k, v)| (k.clone(), v.load(Ordering::Relaxed)))
-            .collect();
-        
-        let gauges: HashMap<String, u64> = self.gauges.read()
+        let counters: HashMap<String, u64> = self
+            .counters
+            .read()
             .iter()
             .map(|(k, v)| (k.clone(), v.load(Ordering::Relaxed)))
             .collect();
 
-        let histograms: HashMap<String, HistogramSummary> = self.histograms.read()
+        let gauges: HashMap<String, u64> = self
+            .gauges
+            .read()
+            .iter()
+            .map(|(k, v)| (k.clone(), v.load(Ordering::Relaxed)))
+            .collect();
+
+        let histograms: HashMap<String, HistogramSummary> = self
+            .histograms
+            .read()
             .iter()
             .map(|(k, h)| {
                 let count = h.count.load(Ordering::Relaxed);
                 let sum = h.sum.load(Ordering::Relaxed);
-                (k.clone(), HistogramSummary {
-                    count,
-                    sum,
-                    mean: if count > 0 { sum / count } else { 0 },
-                    buckets: h.buckets.clone(),
-                    bucket_counts: h.bucket_counts.iter()
-                        .map(|c| c.load(Ordering::Relaxed))
-                        .collect(),
-                })
+                (
+                    k.clone(),
+                    HistogramSummary {
+                        count,
+                        sum,
+                        mean: if count > 0 { sum / count } else { 0 },
+                        buckets: h.buckets.clone(),
+                        bucket_counts: h
+                            .bucket_counts
+                            .iter()
+                            .map(|c| c.load(Ordering::Relaxed))
+                            .collect(),
+                    },
+                )
             })
             .collect();
 
@@ -311,8 +324,7 @@ impl Default for OtlpConfig {
             service_name: std::env::var("OTEL_SERVICE_NAME")
                 .unwrap_or_else(|_| "synapse".to_string()),
             service_version: env!("CARGO_PKG_VERSION").to_string(),
-            environment: std::env::var("SYNAPSE_ENV")
-                .unwrap_or_else(|_| "development".to_string()),
+            environment: std::env::var("SYNAPSE_ENV").unwrap_or_else(|_| "development".to_string()),
             export_interval_secs: 60,
         }
     }
@@ -326,24 +338,24 @@ static INITIALIZED: AtomicBool = AtomicBool::new(false);
 pub fn metrics() -> &'static MetricsRegistry {
     METRICS.get_or_init(|| {
         let registry = MetricsRegistry::new();
-        
+
         // Register default histograms with standard latency buckets (microseconds)
         let latency_buckets = vec![
-            100,    // 100μs
-            500,    // 500μs
-            1_000,  // 1ms
-            5_000,  // 5ms
-            10_000, // 10ms
-            50_000, // 50ms
-            100_000, // 100ms
-            500_000, // 500ms
+            100,       // 100μs
+            500,       // 500μs
+            1_000,     // 1ms
+            5_000,     // 5ms
+            10_000,    // 10ms
+            50_000,    // 50ms
+            100_000,   // 100ms
+            500_000,   // 500ms
             1_000_000, // 1s
         ];
-        
+
         registry.histogram_register("request_latency_us", latency_buckets.clone());
         registry.histogram_register("query_latency_us", latency_buckets.clone());
         registry.histogram_register("sync_latency_us", latency_buckets);
-        
+
         registry
     })
 }
@@ -377,7 +389,7 @@ pub mod metric_names {
     pub const CONFLICTS_DETECTED: &str = "synapse_conflicts_detected";
     /// Total number of Raft leader elections triggered.
     pub const RAFT_ELECTIONS: &str = "synapse_raft_elections";
-    
+
     // Gauges
     /// Current number of active client connections.
     pub const ACTIVE_CONNECTIONS: &str = "synapse_active_connections";
@@ -389,7 +401,7 @@ pub mod metric_names {
     pub const RAFT_TERM: &str = "synapse_raft_term";
     /// Highest log index committed by the Raft consensus.
     pub const RAFT_COMMIT_INDEX: &str = "synapse_raft_commit_index";
-    
+
     // Histograms
     /// Request latency distribution in microseconds.
     pub const REQUEST_LATENCY: &str = "request_latency_us";
@@ -419,8 +431,7 @@ pub fn init() -> Result<()> {
         return Ok(()); // Already initialized
     }
 
-    let env_filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("info"));
+    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
 
     let use_json = std::env::var("SYNAPSE_LOG_FORMAT")
         .map(|v| v.to_lowercase() == "json")
@@ -428,32 +439,28 @@ pub fn init() -> Result<()> {
 
     if use_json {
         // JSON format for production / log aggregation
-        let subscriber = tracing_subscriber::registry()
-            .with(env_filter)
-            .with(
-                fmt::layer()
-                    .json()
-                    .with_span_events(FmtSpan::CLOSE)
-                    .with_current_span(true)
-                    .with_thread_ids(true)
-                    .with_file(true)
-                    .with_line_number(true),
-            );
+        let subscriber = tracing_subscriber::registry().with(env_filter).with(
+            fmt::layer()
+                .json()
+                .with_span_events(FmtSpan::CLOSE)
+                .with_current_span(true)
+                .with_thread_ids(true)
+                .with_file(true)
+                .with_line_number(true),
+        );
 
         tracing::subscriber::set_global_default(subscriber)
             .map_err(|e| SynapseError::internal(format!("Failed to set subscriber: {e}")))?;
     } else {
         // Pretty format for development
-        let subscriber = tracing_subscriber::registry()
-            .with(env_filter)
-            .with(
-                fmt::layer()
-                    .pretty()
-                    .with_span_events(FmtSpan::CLOSE)
-                    .with_thread_ids(false)
-                    .with_file(true)
-                    .with_line_number(true),
-            );
+        let subscriber = tracing_subscriber::registry().with(env_filter).with(
+            fmt::layer()
+                .pretty()
+                .with_span_events(FmtSpan::CLOSE)
+                .with_thread_ids(false)
+                .with_file(true)
+                .with_line_number(true),
+        );
 
         tracing::subscriber::set_global_default(subscriber)
             .map_err(|e| SynapseError::internal(format!("Failed to set subscriber: {e}")))?;
@@ -469,7 +476,7 @@ pub fn init() -> Result<()> {
 pub fn init_with_otlp(config: OtlpConfig) -> Result<()> {
     // First initialize basic logging
     init()?;
-    
+
     // Log OTLP configuration
     tracing::info!(
         service = %config.service_name,
@@ -478,12 +485,12 @@ pub fn init_with_otlp(config: OtlpConfig) -> Result<()> {
         traces_endpoint = ?config.traces_endpoint,
         "OpenTelemetry configured"
     );
-    
+
     // In a full implementation, this would:
     // 1. Initialize opentelemetry-otlp tracer
     // 2. Create a tracing-opentelemetry layer
     // 3. Start the metrics export loop
-    
+
     Ok(())
 }
 
@@ -540,10 +547,10 @@ mod tests {
     #[test]
     fn test_counter_operations() {
         let registry = MetricsRegistry::new();
-        
+
         registry.counter_inc("test_counter");
         assert_eq!(registry.counter_get("test_counter"), 1);
-        
+
         registry.counter_add("test_counter", 5);
         assert_eq!(registry.counter_get("test_counter"), 6);
     }
@@ -551,13 +558,13 @@ mod tests {
     #[test]
     fn test_gauge_operations() {
         let registry = MetricsRegistry::new();
-        
+
         registry.gauge_set("test_gauge", 100);
         assert_eq!(registry.gauge_get("test_gauge"), 100);
-        
+
         registry.gauge_inc("test_gauge");
         assert_eq!(registry.gauge_get("test_gauge"), 101);
-        
+
         registry.gauge_dec("test_gauge");
         assert_eq!(registry.gauge_get("test_gauge"), 100);
     }
@@ -565,14 +572,14 @@ mod tests {
     #[test]
     fn test_histogram_operations() {
         let registry = MetricsRegistry::new();
-        
+
         registry.histogram_register("test_histogram", vec![10, 50, 100, 500, 1000]);
-        
+
         registry.histogram_observe("test_histogram", 5);
         registry.histogram_observe("test_histogram", 25);
         registry.histogram_observe("test_histogram", 75);
         registry.histogram_observe("test_histogram", 200);
-        
+
         let summary = registry.histogram_summary("test_histogram").unwrap();
         assert_eq!(summary.count, 4);
         assert_eq!(summary.sum, 305);
@@ -581,10 +588,10 @@ mod tests {
     #[test]
     fn test_metrics_snapshot() {
         let registry = MetricsRegistry::new();
-        
+
         registry.counter_inc("snapshot_counter");
         registry.gauge_set("snapshot_gauge", 42);
-        
+
         let snapshot = registry.snapshot();
         assert_eq!(snapshot.counters.get("snapshot_counter"), Some(&1));
         assert_eq!(snapshot.gauges.get("snapshot_gauge"), Some(&42));

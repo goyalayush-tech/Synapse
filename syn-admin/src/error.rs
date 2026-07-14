@@ -14,35 +14,39 @@ pub enum AdminError {
     /// Not found
     #[error("Not found: {0}")]
     NotFound(String),
-    
+
     /// Bad request
     #[error("Bad request: {0}")]
     BadRequest(String),
-    
+
     /// Unauthorized
     #[error("Unauthorized")]
     Unauthorized,
-    
+
     /// Forbidden
     #[error("Forbidden: {0}")]
     Forbidden(String),
-    
+
     /// Internal error
     #[error("Internal error: {0}")]
     Internal(String),
-    
+
+    /// Feature not implemented / not supported by the underlying API in this build
+    #[error("Not implemented: {0}")]
+    NotImplemented(String),
+
     /// Enterprise error
     #[error("Enterprise error: {0}")]
     Enterprise(#[from] syn_core::EnterpriseError),
-    
+
     /// Tenant error
     #[error("Tenant error: {0}")]
     Tenant(#[from] syn_core::TenantError),
-    
+
     /// Audit error
     #[error("Audit error: {0}")]
     Audit(#[from] syn_core::AuditError),
-    
+
     /// Backup error
     #[error("Backup error: {0}")]
     Backup(#[from] syn_core::BackupError),
@@ -59,6 +63,7 @@ impl IntoResponse for AdminError {
             AdminError::Unauthorized => (StatusCode::UNAUTHORIZED, "Unauthorized".to_string()),
             AdminError::Forbidden(msg) => (StatusCode::FORBIDDEN, msg.clone()),
             AdminError::Internal(msg) => (StatusCode::INTERNAL_SERVER_ERROR, msg.clone()),
+            AdminError::NotImplemented(msg) => (StatusCode::NOT_IMPLEMENTED, msg.clone()),
             AdminError::Enterprise(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
             AdminError::Tenant(e) => (StatusCode::BAD_REQUEST, e.to_string()),
             AdminError::Audit(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),

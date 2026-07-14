@@ -240,25 +240,74 @@ impl KnowledgeGraph for InMemoryKnowledgeGraph {
             return Err(GraphError::NodeNotFound(relationship.to.clone()));
         }
 
-        self.relationships.insert(relationship.id.clone(), relationship);
+        self.relationships
+            .insert(relationship.id.clone(), relationship);
         Ok(())
     }
 
     async fn query(&self, query: &GraphQuery) -> GraphResult<Vec<Node>> {
-        let mut results = Vec::new();
-
-        if let Some(start_nodes) = &query.start_nodes {
-            for node_id in start_nodes {
-                if let Ok(node) = self.get_node(node_id).await {
-                    results.push(node);
-                }
+        // No start nodes specified: fall back to returning all nodes
+        // (optionally filtered by node_types). There is nothing to traverse
+        // from, so relationship_types/max_depth do not apply.
+        let Some(start_nodes) = &query.start_nodes else {
+            let mut results: Vec<Node> = self.nodes.values().cloned().collect();
+            if let Some(node_types) = &query.node_types {
+                results.retain(|node| node_types.contains(&node.node_type));
             }
-        } else {
-            // Return all nodes if no start nodes specified
-            results.extend(self.nodes.values().cloned());
+            return Ok(results);
+        };
+
+        // BFS over `self.relationships`, starting from `start_nodes` and
+        // following edges (from -> to) whose type is in
+        // `relationship_types` (or all types, if that filter is absent or
+        // empty), up to `max_depth` hops. `max_depth` defaults to 0 (i.e.
+        // no traversal beyond the start nodes themselves) when unspecified.
+        let max_depth = query.max_depth.unwrap_or(0);
+
+        let mut visited: HashMap<String, usize> = HashMap::new();
+        let mut frontier: Vec<String> = Vec::new();
+
+        for node_id in start_nodes {
+            if self.nodes.contains_key(node_id) && !visited.contains_key(node_id) {
+                visited.insert(node_id.clone(), 0);
+                frontier.push(node_id.clone());
+            }
         }
 
-        // Filter by node types if specified
+        let mut depth = 0;
+        while depth < max_depth && !frontier.is_empty() {
+            let mut next_frontier = Vec::new();
+
+            for node_id in &frontier {
+                for rel in self.relationships.values() {
+                    if &rel.from != node_id {
+                        continue;
+                    }
+
+                    if let Some(rel_types) = &query.relationship_types {
+                        if !rel_types.is_empty() && !rel_types.contains(&rel.rel_type) {
+                            continue;
+                        }
+                    }
+
+                    if self.nodes.contains_key(&rel.to) && !visited.contains_key(&rel.to) {
+                        visited.insert(rel.to.clone(), depth + 1);
+                        next_frontier.push(rel.to.clone());
+                    }
+                }
+            }
+
+            frontier = next_frontier;
+            depth += 1;
+        }
+
+        let mut results: Vec<Node> = visited
+            .keys()
+            .filter_map(|id| self.nodes.get(id).cloned())
+            .collect();
+
+        // Filter by node types if specified (applies to all visited nodes,
+        // not just the start nodes).
         if let Some(node_types) = &query.node_types {
             results.retain(|node| node_types.contains(&node.node_type));
         }
@@ -284,15 +333,99 @@ mod tests {
     #[tokio::test]
     async fn graph_add_relationship() {
         let mut graph = InMemoryKnowledgeGraph::new();
-        
+
         let node1 = Node::new("node-1", "Agent");
         let node2 = Node::new("node-2", "Task");
-        
+
         graph.add_node(node1).await.unwrap();
         graph.add_node(node2).await.unwrap();
 
         let rel = Relationship::new("rel-1", "node-1", "node-2", "Assigned_To");
         graph.add_relationship(rel).await.unwrap();
     }
-}
 
+    /// Builds a small graph:
+    ///   A --Assigned_To--> B --Depends_On--> C
+    ///   A --Manages------> D
+    /// and confirms that `query()` performs a real BFS traversal that
+    /// respects both `max_depth` and `relationship_types` filtering.
+    async fn build_traversal_graph() -> InMemoryKnowledgeGraph {
+        let mut graph = InMemoryKnowledgeGraph::new();
+
+        graph.add_node(Node::new("A", "Agent")).await.unwrap();
+        graph.add_node(Node::new("B", "Task")).await.unwrap();
+        graph.add_node(Node::new("C", "Resource")).await.unwrap();
+        graph.add_node(Node::new("D", "Agent")).await.unwrap();
+
+        graph
+            .add_relationship(Relationship::new("rel-ab", "A", "B", "Assigned_To"))
+            .await
+            .unwrap();
+        graph
+            .add_relationship(Relationship::new("rel-bc", "B", "C", "Depends_On"))
+            .await
+            .unwrap();
+        graph
+            .add_relationship(Relationship::new("rel-ad", "A", "D", "Manages"))
+            .await
+            .unwrap();
+
+        graph
+    }
+
+    #[tokio::test]
+    async fn graph_query_no_traversal_without_max_depth() {
+        let graph = build_traversal_graph().await;
+
+        // No max_depth specified: only the start node itself is returned.
+        let query = GraphQuery::new().with_start_nodes(vec!["A".to_string()]);
+        let results = graph.query(&query).await.unwrap();
+        let ids: Vec<&str> = results.iter().map(|n| n.id.as_str()).collect();
+
+        assert_eq!(ids, vec!["A"]);
+    }
+
+    #[tokio::test]
+    async fn graph_query_respects_max_depth() {
+        let graph = build_traversal_graph().await;
+
+        // depth=1 from A reaches B and D, but not C (two hops away).
+        let query = GraphQuery::new()
+            .with_start_nodes(vec!["A".to_string()])
+            .with_max_depth(1);
+        let results = graph.query(&query).await.unwrap();
+        let mut ids: Vec<&str> = results.iter().map(|n| n.id.as_str()).collect();
+        ids.sort_unstable();
+
+        assert_eq!(ids, vec!["A", "B", "D"]);
+
+        // depth=2 from A reaches everything, including C.
+        let query = GraphQuery::new()
+            .with_start_nodes(vec!["A".to_string()])
+            .with_max_depth(2);
+        let results = graph.query(&query).await.unwrap();
+        let mut ids: Vec<&str> = results.iter().map(|n| n.id.as_str()).collect();
+        ids.sort_unstable();
+
+        assert_eq!(ids, vec!["A", "B", "C", "D"]);
+    }
+
+    #[tokio::test]
+    async fn graph_query_respects_relationship_types() {
+        let graph = build_traversal_graph().await;
+
+        // Only follow "Assigned_To" edges, even though max_depth allows
+        // reaching C and D via other relationship types.
+        let query = GraphQuery::new()
+            .with_start_nodes(vec!["A".to_string()])
+            .with_relationship_types(vec!["Assigned_To".to_string()])
+            .with_max_depth(2);
+        let results = graph.query(&query).await.unwrap();
+        let mut ids: Vec<&str> = results.iter().map(|n| n.id.as_str()).collect();
+        ids.sort_unstable();
+
+        // A -> B via Assigned_To is followed; B -> C via Depends_On and
+        // A -> D via Manages are not.
+        assert_eq!(ids, vec!["A", "B"]);
+    }
+}

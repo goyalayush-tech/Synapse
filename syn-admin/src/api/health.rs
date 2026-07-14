@@ -1,8 +1,8 @@
 //! Health check API.
 
-use std::sync::Arc;
 use axum::{extract::State, Json};
 use serde::Serialize;
+use std::sync::Arc;
 
 use crate::state::AppState;
 
@@ -18,9 +18,7 @@ pub struct HealthResponse {
 }
 
 /// Health check endpoint.
-pub async fn health_check(
-    State(state): State<Arc<AppState>>,
-) -> Json<HealthResponse> {
+pub async fn health_check(State(state): State<Arc<AppState>>) -> Json<HealthResponse> {
     Json(HealthResponse {
         status: "healthy".to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),

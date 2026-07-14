@@ -156,10 +156,7 @@ mod tests {
         // Spawn a "server" that accepts one connection
         let mock_clone = mock.clone();
         let server_handle = tokio::spawn(async move {
-            let mut listener = mock_clone
-                .bind_control_socket("test")
-                .await
-                .expect("bind");
+            let mut listener = mock_clone.bind_control_socket("test").await.expect("bind");
 
             let mut stream = listener.accept().await.expect("accept");
 

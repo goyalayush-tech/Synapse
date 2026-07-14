@@ -1,11 +1,11 @@
 //! HTML page handlers.
 
-use std::sync::Arc;
-use axum::extract::State;
 use askama::Template;
+use axum::extract::State;
+use std::sync::Arc;
 
-use crate::state::{AppState, NodeStatus};
 use crate::error::AdminResult;
+use crate::state::{AppState, NodeStatus};
 
 /// Dashboard page template.
 #[derive(Template)]
@@ -102,14 +102,15 @@ pub struct SettingsTemplate {
 }
 
 /// Dashboard page handler.
-pub async fn dashboard(
-    State(state): State<Arc<AppState>>,
-) -> AdminResult<DashboardTemplate> {
+pub async fn dashboard(State(state): State<Arc<AppState>>) -> AdminResult<DashboardTemplate> {
     let nodes = state.nodes.read().await;
-    let healthy = nodes.iter().filter(|n| n.status == NodeStatus::Healthy).count();
+    let healthy = nodes
+        .iter()
+        .filter(|n| n.status == NodeStatus::Healthy)
+        .count();
     let metrics = state.metrics.read().await;
     let tenants = state.enterprise.tenancy.list_tenants().await;
-    
+
     Ok(DashboardTemplate {
         title: "Dashboard - Synapse Admin".to_string(),
         healthy_nodes: healthy,
@@ -122,21 +123,22 @@ pub async fn dashboard(
 }
 
 /// Tenants page handler.
-pub async fn tenants_page(
-    State(state): State<Arc<AppState>>,
-) -> AdminResult<TenantsTemplate> {
+pub async fn tenants_page(State(state): State<Arc<AppState>>) -> AdminResult<TenantsTemplate> {
     let tenants = state.enterprise.tenancy.list_tenants().await;
-    
-    let tenant_rows: Vec<TenantRow> = tenants.into_iter().map(|t| {
-        TenantRow {
-            id: t.id.to_string(),
-            name: t.name.clone(),
-            tier: format!("{:?}", t.tier),
-            status: format!("{:?}", t.status),
-            request_count: 0, // TODO: Get from metrics
-        }
-    }).collect();
-    
+
+    let tenant_rows: Vec<TenantRow> = tenants
+        .into_iter()
+        .map(|t| {
+            TenantRow {
+                id: t.id.to_string(),
+                name: t.name.clone(),
+                tier: format!("{:?}", t.tier),
+                status: format!("{:?}", t.status),
+                request_count: 0, // TODO: Get from metrics
+            }
+        })
+        .collect();
+
     Ok(TenantsTemplate {
         title: "Tenants - Synapse Admin".to_string(),
         tenants: tenant_rows,
@@ -144,12 +146,10 @@ pub async fn tenants_page(
 }
 
 /// Audit page handler.
-pub async fn audit_page(
-    State(state): State<Arc<AppState>>,
-) -> AdminResult<AuditTemplate> {
+pub async fn audit_page(State(state): State<Arc<AppState>>) -> AdminResult<AuditTemplate> {
     let stats = state.enterprise.audit.stats().await;
     let verified = state.enterprise.audit.verify_chain().await.is_ok();
-    
+
     Ok(AuditTemplate {
         title: "Audit Log - Synapse Admin".to_string(),
         total_entries: stats.total_entries as usize,
@@ -158,26 +158,25 @@ pub async fn audit_page(
 }
 
 /// Backups page handler.
-pub async fn backups_page(
-    State(state): State<Arc<AppState>>,
-) -> AdminResult<BackupsTemplate> {
+pub async fn backups_page(State(state): State<Arc<AppState>>) -> AdminResult<BackupsTemplate> {
     let backups = state.enterprise.backup.list_recovery_points().await;
     let next = state.enterprise.backup.next_scheduled_backup().await;
-    
-    let backup_rows: Vec<BackupRow> = backups.into_iter().map(|b| {
-        BackupRow {
+
+    let backup_rows: Vec<BackupRow> = backups
+        .into_iter()
+        .map(|b| BackupRow {
             id: b.id.clone(),
             backup_type: format!("{:?}", b.backup_type),
             status: format!("{:?}", b.status),
             size: format_bytes(b.size_bytes),
             created_at: format_time(b.created_at),
-        }
-    }).collect();
-    
+        })
+        .collect();
+
     let next_scheduled = next
         .map(|t| format_time(t))
         .unwrap_or_else(|| "Not scheduled".to_string());
-    
+
     Ok(BackupsTemplate {
         title: "Backups - Synapse Admin".to_string(),
         backups: backup_rows,
@@ -186,9 +185,7 @@ pub async fn backups_page(
 }
 
 /// Settings page handler.
-pub async fn settings_page(
-    State(state): State<Arc<AppState>>,
-) -> AdminResult<SettingsTemplate> {
+pub async fn settings_page(State(state): State<Arc<AppState>>) -> AdminResult<SettingsTemplate> {
     Ok(SettingsTemplate {
         title: "Settings - Synapse Admin".to_string(),
         cluster_addr: state.config.cluster_addr.clone(),
@@ -202,7 +199,7 @@ fn format_bytes(bytes: u64) -> String {
     const KB: u64 = 1024;
     const MB: u64 = KB * 1024;
     const GB: u64 = MB * 1024;
-    
+
     if bytes >= GB {
         format!("{:.2} GB", bytes as f64 / GB as f64)
     } else if bytes >= MB {
@@ -219,9 +216,8 @@ fn format_time(time: std::time::SystemTime) -> String {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default();
     let secs = duration.as_secs();
-    
+
     // Simple ISO-like format
-    let datetime = chrono::DateTime::from_timestamp(secs as i64, 0)
-        .unwrap_or_default();
+    let datetime = chrono::DateTime::from_timestamp(secs as i64, 0).unwrap_or_default();
     datetime.format("%Y-%m-%d %H:%M:%S").to_string()
 }

@@ -43,8 +43,8 @@ impl NetProvider for RealNetProvider {
 
 #[cfg(windows)]
 async fn bind_control_impl(addr: &str) -> io::Result<Box<dyn ConnectionListener>> {
-    use tokio::net::windows::named_pipe::{ServerOptions, PipeMode};
-    
+    use tokio::net::windows::named_pipe::{PipeMode, ServerOptions};
+
     let pipe_name = format!(r"\\.\pipe\{}", addr);
     tracing::debug!(pipe = %pipe_name, "Binding Windows Named Pipe");
 
@@ -70,21 +70,46 @@ struct WindowsPipeListener {
 #[async_trait]
 impl ConnectionListener for WindowsPipeListener {
     async fn accept(&mut self) -> io::Result<Box<dyn ConnectionStream>> {
-        use tokio::net::windows::named_pipe::ServerOptions;
+        use tokio::net::windows::named_pipe::{PipeMode, ServerOptions};
 
-        // Take the current server instance
-        let server = self.current_server.take()
-            .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "Listener closed"))?;
+        // Borrow (don't remove) the current server instance and wait for a
+        // client to connect. `NamedPipeServer::connect` takes `&self`, so we
+        // never need to take `current_server` out of the `Option` just to
+        // await the connection.
+        //
+        // This matters for the documented cancel-safety contract
+        // (`ConnectionListener::accept`, net/mod.rs): if this future is
+        // dropped while the `.await` below is still pending (e.g. cancelled
+        // by a `tokio::select!` elsewhere), or if `connect()` returns an
+        // error, `self.current_server` still holds a valid, connectable pipe
+        // instance for the next `accept()` call instead of being left `None`
+        // forever.
+        {
+            let server = self
+                .current_server
+                .as_ref()
+                .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "Listener closed"))?;
 
-        // Wait for a client to connect
-        server.connect().await?;
+            server.connect().await?;
+        }
 
-        // Create a new server instance for the next client
+        // A client is now connected to the instance in `current_server`.
+        // Create a fresh instance to listen for the *next* client and swap
+        // it in, handing back the now-connected instance to the caller.
+        // Only once the replacement instance is successfully created do we
+        // remove the connected one from `current_server` - so a failure here
+        // still leaves a connected (if unconsumed) instance in place rather
+        // than losing pipe state.
         let new_server = ServerOptions::new()
+            .pipe_mode(PipeMode::Message)
             .create(&self.pipe_name)?;
-        self.current_server = Some(new_server);
 
-        Ok(Box::new(server))
+        let connected_server = self
+            .current_server
+            .replace(new_server)
+            .expect("current_server was Some when accept() started and was not mutated since");
+
+        Ok(Box::new(connected_server))
     }
 
     fn local_addr(&self) -> io::Result<String> {
@@ -93,7 +118,7 @@ impl ConnectionListener for WindowsPipeListener {
 }
 
 // =============================================================================
-// Unix Implementation  
+// Unix Implementation
 // =============================================================================
 
 #[cfg(unix)]
@@ -101,10 +126,10 @@ async fn bind_control_impl(addr: &str) -> io::Result<Box<dyn ConnectionListener>
     use tokio::net::UnixListener;
 
     let socket_path = format!("/tmp/{}.sock", addr);
-    
+
     // Remove existing socket file if present
     let _ = std::fs::remove_file(&socket_path);
-    
+
     tracing::debug!(path = %socket_path, "Binding Unix Domain Socket");
 
     let listener = UnixListener::bind(&socket_path)?;

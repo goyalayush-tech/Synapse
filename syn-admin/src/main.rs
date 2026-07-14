@@ -7,21 +7,20 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use axum::{
-    routing::{get, post, delete},
+    http::{HeaderValue, Method},
+    middleware,
+    routing::{delete, get, post},
     Router,
 };
 use tower_http::{
     compression::CompressionLayer,
-    cors::{Any, CorsLayer},
+    cors::{AllowOrigin, CorsLayer},
     services::ServeDir,
     trace::TraceLayer,
 };
 use tracing::info;
 
-use syn_admin::{
-    AdminConfig, AppState,
-    api, handlers,
-};
+use syn_admin::{api, handlers, middleware as admin_middleware, AdminConfig, AppState};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -36,9 +35,30 @@ async fn main() -> anyhow::Result<()> {
     // Load configuration
     let config = AdminConfig::from_env();
     let addr: SocketAddr = config.listen_addr.parse()?;
-    
+
     // Initialize application state
     let state = Arc::new(AppState::new(config).await?);
+
+    // Build the CORS layer from the configured origin allowlist. Empty by
+    // default (ADMIN_CORS_ORIGINS unset), which means no cross-origin
+    // browser access is permitted -- same-origin requests are unaffected by
+    // CORS entirely, and this crate has no public unauthenticated use case
+    // that requires a wildcard. Mutating methods are restricted to the
+    // allowlist; GET is included too since admin data is sensitive and
+    // should not be readable cross-origin by default either.
+    let allowed_origins: Vec<HeaderValue> = state
+        .config
+        .cors_allowed_origins
+        .iter()
+        .filter_map(|origin| origin.parse::<HeaderValue>().ok())
+        .collect();
+    let cors = CorsLayer::new()
+        .allow_origin(AllowOrigin::list(allowed_origins))
+        .allow_methods([Method::GET, Method::POST, Method::DELETE])
+        .allow_headers([
+            axum::http::header::AUTHORIZATION,
+            axum::http::header::CONTENT_TYPE,
+        ]);
 
     // Build router
     let app = Router::new()
@@ -48,19 +68,21 @@ async fn main() -> anyhow::Result<()> {
         .route("/audit", get(handlers::audit_page))
         .route("/backups", get(handlers::backups_page))
         .route("/settings", get(handlers::settings_page))
-        // API endpoints
-        .nest("/api", api_routes())
+        // API endpoints, protected by bearer-token auth when
+        // ADMIN_AUTH_ENABLED=1 (see syn_admin::middleware::require_auth).
+        .nest(
+            "/api",
+            api_routes().layer(middleware::from_fn_with_state(
+                state.clone(),
+                admin_middleware::require_auth,
+            )),
+        )
         // Static files
         .nest_service("/static", ServeDir::new("syn-admin/static"))
         // Middleware
         .layer(TraceLayer::new_for_http())
         .layer(CompressionLayer::new())
-        .layer(
-            CorsLayer::new()
-                .allow_origin(Any)
-                .allow_methods(Any)
-                .allow_headers(Any),
-        )
+        .layer(cors)
         .with_state(state);
 
     info!("🚀 syn-admin starting on http://{}", addr);
@@ -99,5 +121,12 @@ fn api_routes() -> Router<Arc<AppState>> {
         // Rate Limits
         .route("/rate-limits", get(api::rate_limits::get_config))
         .route("/rate-limits", post(api::rate_limits::update_config))
-        .route("/rate-limits/:tenant_id", get(api::rate_limits::get_tenant_limits))
+        .route(
+            "/rate-limits/:tenant_id",
+            get(api::rate_limits::get_tenant_limits),
+        )
+        .route(
+            "/rate-limits/:tenant_id",
+            post(api::rate_limits::set_tenant_limit),
+        )
 }

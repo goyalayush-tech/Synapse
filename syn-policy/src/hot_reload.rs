@@ -178,10 +178,7 @@ impl PolicyWatcher {
         let watcher = notify::recommended_watcher(move |res: Result<Event, notify::Error>| {
             if let Ok(event) = res {
                 // Only care about modify/create events
-                if matches!(
-                    event.kind,
-                    EventKind::Modify(_) | EventKind::Create(_)
-                ) {
+                if matches!(event.kind, EventKind::Modify(_) | EventKind::Create(_)) {
                     for path in event.paths {
                         // Check extension
                         if let Some(ext) = path.extension() {
@@ -257,10 +254,12 @@ impl PolicyWatcher {
                 RecursiveMode::NonRecursive
             };
 
-            watcher.watch(&path, mode).map_err(|e| HotReloadError::WatchPath {
-                path: path.clone(),
-                source: e.to_string(),
-            })?;
+            watcher
+                .watch(&path, mode)
+                .map_err(|e| HotReloadError::WatchPath {
+                    path: path.clone(),
+                    source: e.to_string(),
+                })?;
 
             let is_directory = path.is_dir();
             let watched = WatchedPath {
@@ -291,10 +290,12 @@ impl PolicyWatcher {
         let path = path.as_ref().to_path_buf();
 
         if let Some(ref mut watcher) = self._watcher {
-            watcher.unwatch(&path).map_err(|e| HotReloadError::WatchPath {
-                path: path.clone(),
-                source: e.to_string(),
-            })?;
+            watcher
+                .unwatch(&path)
+                .map_err(|e| HotReloadError::WatchPath {
+                    path: path.clone(),
+                    source: e.to_string(),
+                })?;
 
             self.watched_paths.write().remove(&path);
 
@@ -332,12 +333,13 @@ impl PolicyWatcher {
         F: Fn(&str, &Path) -> Result<(), String>,
     {
         let path = path.as_ref();
-        let content = tokio::fs::read_to_string(path)
-            .await
-            .map_err(|e| HotReloadError::ReadFile {
-                path: path.to_path_buf(),
-                source: e.to_string(),
-            })?;
+        let content =
+            tokio::fs::read_to_string(path)
+                .await
+                .map_err(|e| HotReloadError::ReadFile {
+                    path: path.to_path_buf(),
+                    source: e.to_string(),
+                })?;
 
         callback(&content, path).map_err(|e| HotReloadError::ReloadFailed(e))?;
 
@@ -526,13 +528,11 @@ pub mod cedar_integration {
     ) -> impl Fn(&str, &Path) -> Result<(), String> + Send + Sync {
         move |content: &str, path: &Path| {
             info!(path = %path.display(), "Reloading Cedar policies");
-            
-            policy.load_policies(content).map_err(|e| {
-                match e {
-                    CedarError::ParseError(s) => format!("Parse error: {}", s),
-                    CedarError::ValidationError(s) => format!("Validation error: {}", s),
-                    e => e.to_string(),
-                }
+
+            policy.load_policies(content).map_err(|e| match e {
+                CedarError::ParseError(s) => format!("Parse error: {}", s),
+                CedarError::ValidationError(s) => format!("Validation error: {}", s),
+                e => e.to_string(),
             })
         }
     }
@@ -541,12 +541,18 @@ pub mod cedar_integration {
     #[async_trait::async_trait]
     pub trait CedarHotReload {
         /// Start watching a directory for policy changes.
-        async fn watch_directory(&self, path: impl AsRef<Path> + Send) -> HotReloadResult<PolicyWatcher>;
+        async fn watch_directory(
+            &self,
+            path: impl AsRef<Path> + Send,
+        ) -> HotReloadResult<PolicyWatcher>;
     }
 
     #[async_trait::async_trait]
     impl CedarHotReload for Arc<CedarPolicy> {
-        async fn watch_directory(&self, path: impl AsRef<Path> + Send) -> HotReloadResult<PolicyWatcher> {
+        async fn watch_directory(
+            &self,
+            path: impl AsRef<Path> + Send,
+        ) -> HotReloadResult<PolicyWatcher> {
             let policy = self.clone();
             let path = path.as_ref().to_path_buf();
 

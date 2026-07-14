@@ -153,10 +153,10 @@ impl Default for QuicConfig {
         Self {
             max_concurrent_bidi_streams: 100,
             max_concurrent_uni_streams: 100,
-            stream_receive_window: 1024 * 1024,      // 1 MB per stream
-            receive_window: 10 * 1024 * 1024,        // 10 MB per connection
-            idle_timeout_ms: 30_000,                 // 30 seconds
-            keep_alive_interval_ms: 10_000,          // 10 seconds
+            stream_receive_window: 1024 * 1024, // 1 MB per stream
+            receive_window: 10 * 1024 * 1024,   // 10 MB per connection
+            idle_timeout_ms: 30_000,            // 30 seconds
+            keep_alive_interval_ms: 10_000,     // 10 seconds
             allow_insecure: false,
             server_name: None,
         }
@@ -272,10 +272,11 @@ impl QuicServer {
         ));
         server_config.transport_config(Arc::new(config.build_transport_config()));
 
-        let endpoint = Endpoint::server(server_config, addr).map_err(|e| QuicError::BindFailed {
-            addr,
-            reason: e.to_string(),
-        })?;
+        let endpoint =
+            Endpoint::server(server_config, addr).map_err(|e| QuicError::BindFailed {
+                addr,
+                reason: e.to_string(),
+            })?;
 
         tracing::info!("QUIC server listening on {}", addr);
 
@@ -466,21 +467,21 @@ impl ConnectionPool {
             max_connections: 100,
         }
     }
-    
+
     /// Sets the maximum idle time before a connection is closed.
     #[must_use]
     pub fn with_max_idle_time(mut self, duration: Duration) -> Self {
         self.max_idle_time = duration;
         self
     }
-    
+
     /// Sets the maximum number of pooled connections.
     #[must_use]
     pub fn with_max_connections(mut self, max: usize) -> Self {
         self.max_connections = max;
         self
     }
-    
+
     /// Gets a connection to the specified address, reusing an existing one if available.
     ///
     /// # Errors
@@ -490,12 +491,12 @@ impl ConnectionPool {
         // Check for existing connection
         {
             let mut conns = self.connections.write().await;
-            
+
             if let Some(pooled) = conns.get_mut(&addr) {
                 // Check if connection is still valid
                 if pooled.last_used.elapsed() < self.max_idle_time {
                     pooled.last_used = Instant::now();
-                    
+
                     // Return a wrapped connection
                     return Ok(QuicConnection {
                         inner: pooled.connection.clone(),
@@ -507,30 +508,33 @@ impl ConnectionPool {
                 }
             }
         }
-        
+
         // Create new connection
         let conn = self.client.connect(addr, server_name).await?;
-        
+
         // Store in pool
         {
             let mut conns = self.connections.write().await;
-            
+
             // Evict old connections if at capacity
             if conns.len() >= self.max_connections {
                 self.evict_oldest(&mut conns);
             }
-            
-            conns.insert(addr, PooledConnection {
-                connection: conn.inner.clone(),
-                server_name: server_name.to_string(),
-                created_at: Instant::now(),
-                last_used: Instant::now(),
-            });
+
+            conns.insert(
+                addr,
+                PooledConnection {
+                    connection: conn.inner.clone(),
+                    server_name: server_name.to_string(),
+                    created_at: Instant::now(),
+                    last_used: Instant::now(),
+                },
+            );
         }
-        
+
         Ok(conn)
     }
-    
+
     /// Evicts the oldest connection from the pool.
     fn evict_oldest(&self, conns: &mut HashMap<SocketAddr, PooledConnection>) {
         if let Some((oldest_addr, _)) = conns
@@ -543,7 +547,7 @@ impl ConnectionPool {
             }
         }
     }
-    
+
     /// Removes and closes a connection from the pool.
     pub async fn remove(&self, addr: &SocketAddr) {
         let mut conns = self.connections.write().await;
@@ -551,7 +555,7 @@ impl ConnectionPool {
             conn.connection.close(VarInt::from_u32(0), b"removed");
         }
     }
-    
+
     /// Removes all expired connections from the pool.
     pub async fn cleanup(&self) {
         let mut conns = self.connections.write().await;
@@ -560,29 +564,29 @@ impl ConnectionPool {
             .filter(|(_, c)| c.last_used.elapsed() > self.max_idle_time)
             .map(|(a, _)| *a)
             .collect();
-        
+
         for addr in expired {
             if let Some(conn) = conns.remove(&addr) {
                 conn.connection.close(VarInt::from_u32(0), b"expired");
             }
         }
     }
-    
+
     /// Returns statistics about the pool.
     pub async fn stats(&self) -> PoolStats {
         let conns = self.connections.read().await;
-        
+
         let active = conns
             .values()
             .filter(|c| c.last_used.elapsed() < self.max_idle_time)
             .count();
-        
+
         let oldest_age = conns
             .values()
             .map(|c| c.created_at.elapsed())
             .max()
             .unwrap_or(Duration::ZERO);
-        
+
         PoolStats {
             total_connections: conns.len(),
             active_connections: active,
@@ -590,7 +594,7 @@ impl ConnectionPool {
             oldest_connection_age: oldest_age,
         }
     }
-    
+
     /// Closes all connections and clears the pool.
     pub async fn close_all(&self) {
         let mut conns = self.connections.write().await;
@@ -683,11 +687,9 @@ impl QuicConnection {
     ///
     /// Returns an error if opening the stream fails.
     pub async fn open_bi(&self) -> QuicResult<QuicBiStream> {
-        let (send, recv) = self
-            .inner
-            .open_bi()
-            .await
-            .map_err(|e| QuicError::StreamError(format!("Failed to open bidirectional stream: {e}")))?;
+        let (send, recv) = self.inner.open_bi().await.map_err(|e| {
+            QuicError::StreamError(format!("Failed to open bidirectional stream: {e}"))
+        })?;
 
         Ok(QuicBiStream { send, recv })
     }
@@ -698,11 +700,9 @@ impl QuicConnection {
     ///
     /// Returns an error if opening the stream fails.
     pub async fn open_uni(&self) -> QuicResult<QuicSendStream> {
-        let send = self
-            .inner
-            .open_uni()
-            .await
-            .map_err(|e| QuicError::StreamError(format!("Failed to open unidirectional stream: {e}")))?;
+        let send = self.inner.open_uni().await.map_err(|e| {
+            QuicError::StreamError(format!("Failed to open unidirectional stream: {e}"))
+        })?;
 
         Ok(QuicSendStream { inner: send })
     }
@@ -713,11 +713,9 @@ impl QuicConnection {
     ///
     /// Returns an error if accepting fails.
     pub async fn accept_bi(&self) -> QuicResult<QuicBiStream> {
-        let (send, recv) = self
-            .inner
-            .accept_bi()
-            .await
-            .map_err(|e| QuicError::StreamError(format!("Failed to accept bidirectional stream: {e}")))?;
+        let (send, recv) = self.inner.accept_bi().await.map_err(|e| {
+            QuicError::StreamError(format!("Failed to accept bidirectional stream: {e}"))
+        })?;
 
         Ok(QuicBiStream { send, recv })
     }
@@ -728,11 +726,9 @@ impl QuicConnection {
     ///
     /// Returns an error if accepting fails.
     pub async fn accept_uni(&self) -> QuicResult<QuicRecvStream> {
-        let recv = self
-            .inner
-            .accept_uni()
-            .await
-            .map_err(|e| QuicError::StreamError(format!("Failed to accept unidirectional stream: {e}")))?;
+        let recv = self.inner.accept_uni().await.map_err(|e| {
+            QuicError::StreamError(format!("Failed to accept unidirectional stream: {e}"))
+        })?;
 
         Ok(QuicRecvStream { inner: recv })
     }
@@ -995,4 +991,3 @@ mod tests {
         assert_eq!(certs.private_key, vec![4, 5, 6]);
     }
 }
-

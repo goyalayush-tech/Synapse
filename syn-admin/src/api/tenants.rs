@@ -1,11 +1,11 @@
 //! Tenant management API.
 
-use std::sync::Arc;
 use axum::{
     extract::{Path, State},
     Json,
 };
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 use syn_core::enterprise::{TenantId, TenantTier};
 
@@ -63,13 +63,12 @@ pub struct UpdateQuotaRequest {
 }
 
 /// List all tenants.
-pub async fn list_tenants(
-    State(state): State<Arc<AppState>>,
-) -> Json<Vec<TenantResponse>> {
+pub async fn list_tenants(State(state): State<Arc<AppState>>) -> Json<Vec<TenantResponse>> {
     let tenants = state.enterprise.tenancy.list_tenants().await;
-    
-    let responses: Vec<TenantResponse> = tenants.into_iter().map(|t| {
-        TenantResponse {
+
+    let responses: Vec<TenantResponse> = tenants
+        .into_iter()
+        .map(|t| TenantResponse {
             id: t.id.to_string(),
             name: t.name.clone(),
             tier: format!("{:?}", t.tier),
@@ -80,9 +79,9 @@ pub async fn list_tenants(
                 max_storage_bytes: t.quota.max_storage_bytes,
                 max_namespaces: t.quota.max_namespaces,
             },
-        }
-    }).collect();
-    
+        })
+        .collect();
+
     Json(responses)
 }
 
@@ -92,9 +91,13 @@ pub async fn get_tenant(
     Path(id): Path<String>,
 ) -> AdminResult<Json<TenantResponse>> {
     let tenant_id = TenantId::new(&id);
-    let tenant = state.enterprise.tenancy.get_tenant(&tenant_id).await
+    let tenant = state
+        .enterprise
+        .tenancy
+        .get_tenant(&tenant_id)
+        .await
         .map_err(|e| AdminError::NotFound(format!("Tenant not found: {} - {}", id, e)))?;
-    
+
     Ok(Json(TenantResponse {
         id: tenant.id.to_string(),
         name: tenant.name.clone(),
@@ -121,15 +124,19 @@ pub async fn create_tenant(
         Some("Free") => Some(TenantTier::Free),
         _ => None,
     };
-    
+
     // Generate a tenant ID if not provided
     let tenant_id = match req.id {
         Some(id) => TenantId::new(&id),
         None => TenantId::new(&uuid::Uuid::new_v4().to_string()),
     };
-    
-    let tenant = state.enterprise.tenancy.create_tenant(tenant_id, req.name, tier).await?;
-    
+
+    let tenant = state
+        .enterprise
+        .tenancy
+        .create_tenant(tenant_id, req.name, tier)
+        .await?;
+
     Ok(Json(TenantResponse {
         id: tenant.id.to_string(),
         name: tenant.name.clone(),
@@ -151,7 +158,7 @@ pub async fn delete_tenant(
 ) -> AdminResult<Json<serde_json::Value>> {
     let tenant_id = TenantId::new(&id);
     state.enterprise.tenancy.delete_tenant(&tenant_id).await?;
-    
+
     Ok(Json(serde_json::json!({
         "status": "deleted",
         "id": id,
@@ -165,11 +172,15 @@ pub async fn update_quota(
     Json(req): Json<UpdateQuotaRequest>,
 ) -> AdminResult<Json<TenantResponse>> {
     let tenant_id = TenantId::new(&id);
-    
+
     // Get current tenant
-    let mut tenant = state.enterprise.tenancy.get_tenant(&tenant_id).await
+    let mut tenant = state
+        .enterprise
+        .tenancy
+        .get_tenant(&tenant_id)
+        .await
         .map_err(|e| AdminError::NotFound(format!("Tenant not found: {} - {}", id, e)))?;
-    
+
     // Update quota fields
     if let Some(rps) = req.max_rps {
         tenant.quota.max_rps = rps;
@@ -180,10 +191,14 @@ pub async fn update_quota(
     if let Some(ns) = req.max_namespaces {
         tenant.quota.max_namespaces = ns;
     }
-    
+
     // Update tenant via the manager
-    state.enterprise.tenancy.update_tenant(tenant.clone()).await?;
-    
+    state
+        .enterprise
+        .tenancy
+        .update_tenant(tenant.clone())
+        .await?;
+
     Ok(Json(TenantResponse {
         id: tenant.id.to_string(),
         name: tenant.name.clone(),
@@ -203,8 +218,7 @@ fn format_time(time: std::time::SystemTime) -> String {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default();
     let secs = duration.as_secs();
-    
-    let datetime = chrono::DateTime::from_timestamp(secs as i64, 0)
-        .unwrap_or_default();
+
+    let datetime = chrono::DateTime::from_timestamp(secs as i64, 0).unwrap_or_default();
     datetime.format("%Y-%m-%dT%H:%M:%SZ").to_string()
 }

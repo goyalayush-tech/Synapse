@@ -31,31 +31,31 @@
 //! └─────────────────────────────────────────────────────────────────┘
 //! ```
 
-pub mod tenancy;
 pub mod audit;
-pub mod rate_limit;
-pub mod geo_replication;
 pub mod backup;
+pub mod geo_replication;
+pub mod rate_limit;
+pub mod tenancy;
 
-pub use tenancy::{
-    Tenant, TenantId, TenantConfig, TenantManager, Namespace, ResourceQuota,
-    TenantTier, TenantStatus, TenantError, TenantResult,
-};
 pub use audit::{
-    AuditEvent, AuditChain, AuditEntry, AuditSeverity, AuditConfig,
-    AuditError, AuditResult, AuditCategory,
-};
-pub use rate_limit::{
-    RateLimiter, RateLimitConfig, RateLimitResult, TokenBucket, SlidingWindow,
-    QuotaManager, QuotaConfig,
-};
-pub use geo_replication::{
-    GeoRegion, ReplicationConfig, ReplicationManager, ConflictResolver,
-    ReplicationError, ReplicationResult,
+    AuditCategory, AuditChain, AuditConfig, AuditEntry, AuditError, AuditEvent, AuditResult,
+    AuditSeverity,
 };
 pub use backup::{
-    BackupManager, BackupConfig, BackupSchedule, RecoveryPoint, BackupType,
-    BackupError, BackupResult,
+    BackupConfig, BackupError, BackupManager, BackupResult, BackupSchedule, BackupType,
+    RecoveryPoint,
+};
+pub use geo_replication::{
+    ConflictResolver, GeoRegion, ReplicationConfig, ReplicationError, ReplicationManager,
+    ReplicationResult,
+};
+pub use rate_limit::{
+    QuotaConfig, QuotaManager, RateLimitConfig, RateLimitResult, RateLimiter, SlidingWindow,
+    TokenBucket,
+};
+pub use tenancy::{
+    Namespace, ResourceQuota, Tenant, TenantConfig, TenantError, TenantId, TenantManager,
+    TenantResult, TenantStatus, TenantTier,
 };
 
 use std::sync::Arc;
@@ -128,7 +128,7 @@ impl EnterpriseContext {
         let rate_limiter = Arc::new(RateLimiter::new(config.rate_limit_config));
         let replication = Arc::new(ReplicationManager::new(config.replication_config));
         let backup = Arc::new(BackupManager::new(config.backup_config));
-        
+
         Self {
             tenancy,
             audit,
@@ -137,7 +137,7 @@ impl EnterpriseContext {
             backup,
         }
     }
-    
+
     /// Check if a request is allowed based on tenant quotas and rate limits.
     pub async fn check_request(
         &self,
@@ -146,13 +146,13 @@ impl EnterpriseContext {
     ) -> Result<(), EnterpriseError> {
         // Check tenant exists and is active
         self.tenancy.validate_tenant(tenant_id).await?;
-        
+
         // Check rate limits
         self.rate_limiter.check(tenant_id, request_cost).await?;
-        
+
         Ok(())
     }
-    
+
     /// Record an audit event.
     pub async fn audit(&self, event: AuditEvent) -> AuditResult<AuditEntry> {
         self.audit.record(event).await
@@ -165,19 +165,19 @@ pub enum EnterpriseError {
     /// Tenant error
     #[error("Tenant error: {0}")]
     Tenant(#[from] TenantError),
-    
+
     /// Audit error
     #[error("Audit error: {0}")]
     Audit(#[from] AuditError),
-    
+
     /// Rate limit exceeded
     #[error("Rate limit exceeded: {0}")]
     RateLimitExceeded(String),
-    
+
     /// Replication error
     #[error("Replication error: {0}")]
     Replication(#[from] ReplicationError),
-    
+
     /// Backup error
     #[error("Backup error: {0}")]
     Backup(#[from] BackupError),

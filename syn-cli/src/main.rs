@@ -122,6 +122,10 @@ enum Commands {
         /// Show detailed peer information
         #[arg(long)]
         verbose: bool,
+
+        /// Use demo data for testing
+        #[arg(long)]
+        demo: bool,
     },
 }
 
@@ -136,30 +140,37 @@ async fn main() -> Result<()> {
     let _ = telemetry::init(); // Ignore error if already initialized
 
     match cli.command {
-        Commands::Up { config, foreground } => {
-            cmd_up(&config, foreground).await
+        Commands::Up { config, foreground } => cmd_up(&config, foreground).await,
+        Commands::Status => send_command_and_print(ControlCommand::GetStatus).await,
+        Commands::Reload => send_command_and_print(ControlCommand::Reload).await,
+        Commands::Stop => send_command_and_print(ControlCommand::Shutdown).await,
+        Commands::Ping => send_command_and_print(ControlCommand::Ping).await,
+        Commands::Blame {
+            query,
+            data_dir,
+            limit,
+            full,
+            demo,
+        } => cmd_blame(&query, &data_dir, limit, full, demo).await,
+        Commands::Conflicts {
+            data_dir,
+            key,
+            include_resolved,
+            limit,
+            demo,
+            format,
+        } => {
+            cmd_conflicts(
+                &data_dir,
+                key.as_deref(),
+                include_resolved,
+                limit,
+                demo,
+                &format,
+            )
+            .await
         }
-        Commands::Status => {
-            send_command_and_print(ControlCommand::GetStatus).await
-        }
-        Commands::Reload => {
-            send_command_and_print(ControlCommand::Reload).await
-        }
-        Commands::Stop => {
-            send_command_and_print(ControlCommand::Shutdown).await
-        }
-        Commands::Ping => {
-            send_command_and_print(ControlCommand::Ping).await
-        }
-        Commands::Blame { query, data_dir, limit, full, demo } => {
-            cmd_blame(&query, &data_dir, limit, full, demo).await
-        }
-        Commands::Conflicts { data_dir, key, include_resolved, limit, demo, format } => {
-            cmd_conflicts(&data_dir, key.as_deref(), include_resolved, limit, demo, &format).await
-        }
-        Commands::Cluster { verbose } => {
-            cmd_cluster(verbose).await
-        }
+        Commands::Cluster { verbose, demo } => cmd_cluster(verbose, demo).await,
     }
 }
 
@@ -183,7 +194,7 @@ async fn cmd_up(config: &str, foreground: bool) -> Result<()> {
     } else {
         // Daemonize - spawn as background process
         println!("Starting Synapse proxy as daemon...");
-        
+
         // Platform-specific daemonization would go here
         // For now, just provide instructions
         println!();
@@ -213,7 +224,10 @@ async fn send_command_and_print(cmd: ControlCommand) -> Result<()> {
             println!("║ Uptime:       {:>19}s ║", status.uptime_secs);
             println!("║ Active Conns: {:>22} ║", status.active_connections);
             println!("║ Total Conns:  {:>22} ║", status.total_connections);
-            println!("║ Accepting:    {:>22} ║", if status.accepting { "yes" } else { "no" });
+            println!(
+                "║ Accepting:    {:>22} ║",
+                if status.accepting { "yes" } else { "no" }
+            );
             println!("╚══════════════════════════════════════╝");
         }
         ControlResponse::Metrics(metrics) => {
@@ -237,7 +251,10 @@ async fn send_command(cmd: ControlCommand) -> Result<ControlResponse> {
     // Send the command as newline-delimited JSON
     let mut cmd_bytes = cmd.to_json().context("Failed to serialize command")?;
     cmd_bytes.push(b'\n');
-    stream.write_all(&cmd_bytes).await.context("Failed to send command")?;
+    stream
+        .write_all(&cmd_bytes)
+        .await
+        .context("Failed to send command")?;
     stream.flush().await?;
 
     // Read the response
@@ -248,13 +265,13 @@ async fn send_command(cmd: ControlCommand) -> Result<ControlResponse> {
         .await
         .context("Failed to read response")?;
 
-    ControlResponse::from_json(response_line.trim().as_bytes())
-        .context("Failed to parse response")
+    ControlResponse::from_json(response_line.trim().as_bytes()).context("Failed to parse response")
 }
 
 /// Connects to the proxy's control socket.
 #[cfg(windows)]
-async fn connect_control_socket() -> Result<impl tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin> {
+async fn connect_control_socket(
+) -> Result<impl tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin> {
     use tokio::net::windows::named_pipe::ClientOptions;
 
     let pipe_name = r"\\.\pipe\synapse_ctl";
@@ -266,7 +283,8 @@ async fn connect_control_socket() -> Result<impl tokio::io::AsyncRead + tokio::i
 }
 
 #[cfg(unix)]
-async fn connect_control_socket() -> Result<impl tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin> {
+async fn connect_control_socket(
+) -> Result<impl tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin> {
     use tokio::net::UnixStream;
 
     let socket_path = "/tmp/synapse_ctl.sock";
@@ -278,7 +296,8 @@ async fn connect_control_socket() -> Result<impl tokio::io::AsyncRead + tokio::i
 }
 
 #[cfg(not(any(windows, unix)))]
-async fn connect_control_socket() -> Result<impl tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin> {
+async fn connect_control_socket(
+) -> Result<impl tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin> {
     use tokio::net::TcpStream;
 
     // Fallback to TCP on localhost
@@ -321,7 +340,10 @@ async fn cmd_blame(
         println!();
         println!("Tips:");
         println!("  • Use --demo flag to see example output");
-        println!("  • Ensure the data directory exists: {}", data_dir.display());
+        println!(
+            "  • Ensure the data directory exists: {}",
+            data_dir.display()
+        );
         println!("  • Check that events have been recorded by the proxy");
         return Ok(());
     }
@@ -358,7 +380,11 @@ async fn cmd_blame(
         return Ok(());
     }
 
-    println!("🔍 Found {} matching events (showing top {}):", results.len(), limit.min(results.len()));
+    println!(
+        "🔍 Found {} matching events (showing top {}):",
+        results.len(),
+        limit.min(results.len())
+    );
     println!();
 
     // Display causal chain visualization
@@ -487,10 +513,7 @@ async fn load_events_from_store(data_dir: &PathBuf) -> Result<Vec<Event>> {
         .await
         .context("Failed to open event store")?;
 
-    let events = store
-        .read_from(0)
-        .await
-        .context("Failed to read events")?;
+    let events = store.read_from(0).await.context("Failed to read events")?;
 
     Ok(events)
 }
@@ -514,7 +537,6 @@ async fn generate_demo_events() -> Result<Vec<Event>> {
         )
         .with_source("orchestrator")
         .with_reason("User requested auth system review"),
-
         Event::new(
             2,
             "task.assigned",
@@ -527,7 +549,6 @@ async fn generate_demo_events() -> Result<Vec<Event>> {
         )
         .with_source("orchestrator")
         .with_reason("Security audit requirement"),
-
         Event::new(
             3,
             "code.analyzed",
@@ -540,7 +561,6 @@ async fn generate_demo_events() -> Result<Vec<Event>> {
         )
         .with_source("auth-agent-001")
         .with_reason("Static analysis of auth module"),
-
         Event::new(
             4,
             "decision.made",
@@ -554,7 +574,6 @@ async fn generate_demo_events() -> Result<Vec<Event>> {
         )
         .with_source("auth-agent-001")
         .with_reason("Addressing security vulnerabilities in JWT handling"),
-
         Event::new(
             5,
             "code.modified",
@@ -567,7 +586,6 @@ async fn generate_demo_events() -> Result<Vec<Event>> {
         )
         .with_source("auth-agent-001")
         .with_reason("Implementing decision dec-001"),
-
         Event::new(
             6,
             "test.executed",
@@ -580,7 +598,6 @@ async fn generate_demo_events() -> Result<Vec<Event>> {
         )
         .with_source("auth-agent-001")
         .with_reason("Validating auth modifications"),
-
         Event::new(
             7,
             "task.completed",
@@ -597,20 +614,44 @@ async fn generate_demo_events() -> Result<Vec<Event>> {
 
     // Add events to store
     for event in events {
-        store.append(event).await.context("Failed to append demo event")?;
+        store
+            .append(event)
+            .await
+            .context("Failed to append demo event")?;
     }
 
     // Read back all events
-    store.read_from(0).await.context("Failed to read demo events")
+    store
+        .read_from(0)
+        .await
+        .context("Failed to read demo events")
 }
 
 /// Truncates a string to a maximum length, adding "..." if truncated.
+///
+/// `s` may contain arbitrary user-supplied text (e.g. `blame` queries or
+/// `conflicts --key` filters), which can include multi-byte UTF-8
+/// characters. This never slices through the middle of a character (which
+/// would panic) and never underflows on a small `max_len`.
 fn truncate(s: &str, max_len: usize) -> String {
     if s.len() <= max_len {
-        s.to_string()
-    } else {
-        format!("{}...", &s[..max_len - 3])
+        return s.to_string();
     }
+    if max_len < 3 {
+        // Not enough room to fit a "..." suffix meaningfully; avoid the
+        // `max_len - 3` underflow and just return the input unchanged.
+        return s.to_string();
+    }
+
+    // Find the largest valid char boundary at or before the target byte
+    // offset, so the slice below never lands mid-character.
+    let target = max_len - 3;
+    let mut boundary = target;
+    while boundary > 0 && !s.is_char_boundary(boundary) {
+        boundary -= 1;
+    }
+
+    format!("{}...", &s[..boundary])
 }
 
 // ============================================================================
@@ -717,7 +758,10 @@ async fn cmd_conflicts(
     if let Some(key) = key_filter {
         println!("║ Filter: {:50} ║", truncate(key, 50));
     }
-    println!("║ Include Resolved: {:39} ║", if include_resolved { "yes" } else { "no" });
+    println!(
+        "║ Include Resolved: {:39} ║",
+        if include_resolved { "yes" } else { "no" }
+    );
     println!("╚══════════════════════════════════════════════════════════╝");
     println!();
 
@@ -769,7 +813,10 @@ async fn cmd_conflicts(
     println!("─────────────────────────────────────────────────────────────");
     let active = filtered.iter().filter(|c| c.resolution.is_none()).count();
     let resolved = filtered.len() - active;
-    println!("📊 Summary: {} active conflicts, {} resolved", active, resolved);
+    println!(
+        "📊 Summary: {} active conflicts, {} resolved",
+        active, resolved
+    );
 
     Ok(())
 }
@@ -799,13 +846,19 @@ fn print_conflicts_table(conflicts: &[CrdtConflict]) {
     println!();
 
     // Detailed view for active conflicts
-    let active: Vec<_> = conflicts.iter().filter(|c| c.resolution.is_none()).collect();
+    let active: Vec<_> = conflicts
+        .iter()
+        .filter(|c| c.resolution.is_none())
+        .collect();
     if !active.is_empty() {
         println!("🔍 Active Conflict Details:");
         println!();
 
         for conflict in active {
-            println!("  ╭─ Conflict: {} ─────────────────────────────", conflict.id);
+            println!(
+                "  ╭─ Conflict: {} ─────────────────────────────",
+                conflict.id
+            );
             println!("  │ Key:  {}", conflict.key);
             println!("  │ Type: {}", conflict.conflict_type);
             println!("  │ Nodes: {}", conflict.nodes.join(", "));
@@ -818,8 +871,9 @@ fn print_conflicts_table(conflicts: &[CrdtConflict]) {
                     .iter()
                     .map(|(k, v)| format!("{}:{}", k, v))
                     .collect();
-                
-                println!("  │   {}. [{}] {} -> \"{}\"",
+
+                println!(
+                    "  │   {}. [{}] {} -> \"{}\"",
                     i + 1,
                     vc.join(", "),
                     value.node,
@@ -922,15 +976,9 @@ fn print_conflicts_graph(conflicts: &[CrdtConflict]) {
 
 fn suggest_resolution(conflict: &CrdtConflict) -> String {
     match conflict.conflict_type {
-        ConflictType::ConcurrentEdit => {
-            "Automerge semantic merge (text CRDT)".to_string()
-        }
-        ConflictType::NetworkPartition => {
-            "Wait for partition heal, then reconcile".to_string()
-        }
-        ConflictType::MergeRequired => {
-            "Apply CRDT merge rules (commutative)".to_string()
-        }
+        ConflictType::ConcurrentEdit => "Automerge semantic merge (text CRDT)".to_string(),
+        ConflictType::NetworkPartition => "Wait for partition heal, then reconcile".to_string(),
+        ConflictType::MergeRequired => "Apply CRDT merge rules (commutative)".to_string(),
         ConflictType::VectorClockDivergence => {
             "Use vector clock ordering (causal consistency)".to_string()
         }
@@ -976,7 +1024,11 @@ fn generate_demo_conflicts() -> Vec<CrdtConflict> {
             key: "topics/events/metadata".to_string(),
             conflict_type: ConflictType::NetworkPartition,
             detected_at: now,
-            nodes: vec!["node-east".to_string(), "node-central".to_string(), "node-west".to_string()],
+            nodes: vec![
+                "node-east".to_string(),
+                "node-central".to_string(),
+                "node-west".to_string(),
+            ],
             resolution: None,
             values: vec![
                 ConflictValue {
@@ -1028,14 +1080,24 @@ fn generate_demo_conflicts() -> Vec<CrdtConflict> {
 // Cluster Status Command
 // ============================================================================
 
-async fn cmd_cluster(verbose: bool) -> Result<()> {
+async fn cmd_cluster(verbose: bool, demo: bool) -> Result<()> {
     println!("╔══════════════════════════════════════════════════════════╗");
     println!("║                SYNAPSE CLUSTER STATUS                    ║");
     println!("╚══════════════════════════════════════════════════════════╝");
     println!();
 
-    // In real implementation, would query the cluster via control socket
-    // For now, show demo data
+    if !demo {
+        // Mirrors cmd_conflicts: there is no real cluster query implemented
+        // yet (would need to go through the control socket), so make that
+        // explicit instead of printing a hardcoded fake topology that looks
+        // like live data.
+        println!("⚠ Real cluster state loading not yet implemented.");
+        println!("  Use --demo to see example output.");
+        return Ok(());
+    }
+
+    println!("📦 Using demo data...");
+    println!();
 
     println!("🔗 Cluster Topology:");
     println!();

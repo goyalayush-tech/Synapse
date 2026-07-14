@@ -35,9 +35,13 @@
 //! - Even with the encrypted module, you need the exact eBPF state to decrypt
 //! - The broker becomes the ONLY place where policies can execute
 
-use std::sync::Arc;
+use std::sync::{Arc, Once};
 use tokio::sync::broadcast;
 use tracing::{debug, info, instrument, warn};
+
+/// Ensures the "no vector store wired up" warning in `recall` is only
+/// emitted once per process.
+static RECALL_WARNING: Once = Once::new();
 
 /// Events from the eBPF layer.
 ///
@@ -180,19 +184,33 @@ impl IntentRecord {
     /// Create from eBPF event and verdict
     pub fn from_event(event: &EbpfEvent, verdict: &PolicyVerdict, id: u64) -> Self {
         let (action, description, source_pid, timestamp_ns) = match event {
-            EbpfEvent::Fork { parent_pid, child_pid, timestamp_ns } => (
+            EbpfEvent::Fork {
+                parent_pid,
+                child_pid,
+                timestamp_ns,
+            } => (
                 "fork".to_string(),
                 format!("Process {} forked child {}", parent_pid, child_pid),
                 *parent_pid,
                 *timestamp_ns,
             ),
-            EbpfEvent::Exec { pid, path, timestamp_ns, .. } => (
+            EbpfEvent::Exec {
+                pid,
+                path,
+                timestamp_ns,
+                ..
+            } => (
                 "exec".to_string(),
                 format!("Process {} executed {}", pid, path),
                 *pid,
                 *timestamp_ns,
             ),
-            EbpfEvent::Connect { pid, dest_ip, dest_port, timestamp_ns } => (
+            EbpfEvent::Connect {
+                pid,
+                dest_ip,
+                dest_port,
+                timestamp_ns,
+            } => (
                 "connect".to_string(),
                 format!(
                     "Process {} connected to {}:{}",
@@ -203,13 +221,21 @@ impl IntentRecord {
                 *pid,
                 *timestamp_ns,
             ),
-            EbpfEvent::Exit { pid, exit_code, timestamp_ns } => (
+            EbpfEvent::Exit {
+                pid,
+                exit_code,
+                timestamp_ns,
+            } => (
                 "exit".to_string(),
                 format!("Process {} exited with code {}", pid, exit_code),
                 *pid,
                 *timestamp_ns,
             ),
-            EbpfEvent::CgroupAttach { pid, cgroup_id, timestamp_ns } => (
+            EbpfEvent::CgroupAttach {
+                pid,
+                cgroup_id,
+                timestamp_ns,
+            } => (
                 "cgroup_attach".to_string(),
                 format!("Process {} attached to cgroup {}", pid, cgroup_id),
                 *pid,
@@ -298,7 +324,9 @@ impl UncopyableRuntime {
         self.verify_user()?;
 
         // 3. Mark as verified
-        self.state.verified.store(true, std::sync::atomic::Ordering::SeqCst);
+        self.state
+            .verified
+            .store(true, std::sync::atomic::Ordering::SeqCst);
 
         info!("Environment verification passed");
         Ok(())
@@ -349,14 +377,20 @@ impl UncopyableRuntime {
     /// 3. Store intent in Vector Memory
     #[instrument(skip(self, event), fields(event_type = ?event))]
     pub async fn process_event(&self, event: EbpfEvent) -> Result<IntentRecord, String> {
-        if !self.state.verified.load(std::sync::atomic::Ordering::SeqCst) {
+        if !self
+            .state
+            .verified
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
             return Err("Runtime not verified - call verify_environment() first".to_string());
         }
 
         debug!("Processing event: {:?}", event);
 
         // 1. Generate event ID
-        let id = self.next_id.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let id = self
+            .next_id
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 
         // 2. Evaluate policy (placeholder - in production calls WasmHost)
         let verdict = self.evaluate_policy(&event).await?;
@@ -383,15 +417,18 @@ impl UncopyableRuntime {
         // let verdict = self.wasm_host.evaluate(policy_event).await?;
         // return Ok(verdict.into());
 
-        // Placeholder: default allow
+        // No real policy backend (WasmHost/Cedar) is wired up yet. Fail closed:
+        // deny by default rather than silently allowing everything through.
         match event {
             EbpfEvent::Connect { dest_port, .. } if *dest_port == 22 => {
-                // Example: deny SSH connections
+                // Example: allow SSH connections but flag them for audit
                 Ok(PolicyVerdict::AllowWithAudit {
                     tags: vec!["ssh".to_string(), "sensitive".to_string()],
                 })
             }
-            _ => Ok(PolicyVerdict::Allow),
+            _ => Ok(PolicyVerdict::Deny {
+                reason: "no policy backend configured — denying by default".to_string(),
+            }),
         }
     }
 
@@ -419,6 +456,13 @@ impl UncopyableRuntime {
         // let results = self.lance_store.vector_search(&embedding, limit).await?;
         // return Ok(results);
 
+        RECALL_WARNING.call_once(|| {
+            warn!(
+                "UncopyableRuntime::recall has no real vector store wired up (LanceDB \
+                 integration is not implemented); it always returns an empty result set."
+            );
+        });
+
         // Placeholder: return empty
         Ok(Vec::new())
     }
@@ -426,7 +470,10 @@ impl UncopyableRuntime {
     /// Get runtime statistics
     pub fn stats(&self) -> RuntimeStats {
         RuntimeStats {
-            verified: self.state.verified.load(std::sync::atomic::Ordering::SeqCst),
+            verified: self
+                .state
+                .verified
+                .load(std::sync::atomic::Ordering::SeqCst),
             uptime_secs: self.state.started_at.elapsed().as_secs(),
             events_processed: self.next_id.load(std::sync::atomic::Ordering::SeqCst) - 1,
         }
@@ -455,7 +502,10 @@ mod tests {
     async fn test_runtime_creation() {
         let config = UncopyableConfig::default();
         let runtime = UncopyableRuntime::new(config);
-        assert!(!runtime.state.verified.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(!runtime
+            .state
+            .verified
+            .load(std::sync::atomic::Ordering::SeqCst));
     }
 
     #[tokio::test]

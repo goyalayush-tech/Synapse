@@ -62,11 +62,7 @@ pub struct Event {
 impl Event {
     /// Creates a new event.
     #[must_use]
-    pub fn new(
-        event_id: u64,
-        event_type: impl Into<String>,
-        payload: serde_json::Value,
-    ) -> Self {
+    pub fn new(event_id: u64, event_type: impl Into<String>, payload: serde_json::Value) -> Self {
         Self {
             event_id,
             event_type: event_type.into(),
@@ -308,8 +304,9 @@ use tokio::sync::Mutex;
 pub struct FileEventStore {
     /// Base directory for storage.
     data_dir: PathBuf,
-    /// Current event file handle.
-    current_file: Mutex<Option<BufWriter<File>>>,
+    /// Current event file handle, paired with the path it was opened for
+    /// so we can detect when the event ID has crossed into a new file.
+    current_file: Mutex<Option<(PathBuf, BufWriter<File>)>>,
     /// Next event ID.
     next_event_id: Mutex<u64>,
     /// Events per file.
@@ -330,16 +327,23 @@ impl FileEventStore {
         let data_dir = data_dir.as_ref().to_path_buf();
 
         // Create directory structure
-        fs::create_dir_all(data_dir.join("events")).await
-            .map_err(|e| EventStoreError::AppendFailed(format!("Failed to create events dir: {e}")))?;
-        fs::create_dir_all(data_dir.join("snapshots")).await
-            .map_err(|e| EventStoreError::AppendFailed(format!("Failed to create snapshots dir: {e}")))?;
+        fs::create_dir_all(data_dir.join("events"))
+            .await
+            .map_err(|e| {
+                EventStoreError::AppendFailed(format!("Failed to create events dir: {e}"))
+            })?;
+        fs::create_dir_all(data_dir.join("snapshots"))
+            .await
+            .map_err(|e| {
+                EventStoreError::AppendFailed(format!("Failed to create snapshots dir: {e}"))
+            })?;
 
         // Load or initialize metadata
         let metadata_path = data_dir.join("metadata.json");
         let next_event_id = if metadata_path.exists() {
-            let content = fs::read_to_string(&metadata_path).await
-                .map_err(|e| EventStoreError::ReadFailed(format!("Failed to read metadata: {e}")))?;
+            let content = fs::read_to_string(&metadata_path).await.map_err(|e| {
+                EventStoreError::ReadFailed(format!("Failed to read metadata: {e}"))
+            })?;
             let meta: StoreMetadata = serde_json::from_str(&content)
                 .map_err(|e| EventStoreError::ReadFailed(format!("Invalid metadata: {e}")))?;
             meta.next_event_id
@@ -374,43 +378,72 @@ impl FileEventStore {
     /// Returns the path to an events file for a given event ID.
     fn events_file_path(&self, event_id: u64) -> PathBuf {
         let file_num = (event_id.saturating_sub(1)) / self.events_per_file;
-        self.data_dir.join("events").join(format!("events_{file_num:06}.ndjson"))
+        self.data_dir
+            .join("events")
+            .join(format!("events_{file_num:06}.ndjson"))
     }
 
     /// Returns the path to a snapshot file.
     fn snapshot_path(&self, event_id: u64) -> PathBuf {
-        self.data_dir.join("snapshots").join(format!("snapshot_{event_id:06}.json"))
+        self.data_dir
+            .join("snapshots")
+            .join(format!("snapshot_{event_id:06}.json"))
     }
 
     /// Saves metadata to disk.
     async fn save_metadata(&self) -> EventStoreResult<()> {
         let next_id = *self.next_event_id.lock().await;
-        let meta = StoreMetadata { next_event_id: next_id };
-        let content = serde_json::to_string_pretty(&meta)
-            .map_err(|e| EventStoreError::AppendFailed(format!("Failed to serialize metadata: {e}")))?;
-        
-        fs::write(self.data_dir.join("metadata.json"), content).await
+        let meta = StoreMetadata {
+            next_event_id: next_id,
+        };
+        let content = serde_json::to_string_pretty(&meta).map_err(|e| {
+            EventStoreError::AppendFailed(format!("Failed to serialize metadata: {e}"))
+        })?;
+
+        fs::write(self.data_dir.join("metadata.json"), content)
+            .await
             .map_err(|e| EventStoreError::AppendFailed(format!("Failed to write metadata: {e}")))?;
-        
+
         Ok(())
     }
 
     /// Gets or creates the file handle for the current events file.
+    ///
+    /// Rotates to a new file once the given `event_id` maps to a different
+    /// path than the currently-open file (i.e. we've crossed the
+    /// `events_per_file` boundary). Without this check, the store would keep
+    /// appending to the first file forever.
     async fn get_current_file(&self, event_id: u64) -> EventStoreResult<()> {
         let path = self.events_file_path(event_id);
         let mut file_guard = self.current_file.lock().await;
 
-        // Check if we need a new file
-        let need_new_file = file_guard.is_none();
+        // Check if we need a new file: either none is open yet, or the
+        // computed path for this event ID differs from the currently open
+        // file's path (i.e. we've rotated into a new events file).
+        let need_new_file = match &*file_guard {
+            None => true,
+            Some((current_path, _)) => current_path != &path,
+        };
 
         if need_new_file {
+            // Flush and close the previous file (if any) before rotating.
+            if let Some((_, mut writer)) = file_guard.take() {
+                writer.flush().await.map_err(|e| {
+                    EventStoreError::AppendFailed(format!(
+                        "Failed to flush events file before rotation: {e}"
+                    ))
+                })?;
+            }
+
             let file = OpenOptions::new()
                 .create(true)
                 .append(true)
                 .open(&path)
                 .await
-                .map_err(|e| EventStoreError::AppendFailed(format!("Failed to open events file: {e}")))?;
-            *file_guard = Some(BufWriter::new(file));
+                .map_err(|e| {
+                    EventStoreError::AppendFailed(format!("Failed to open events file: {e}"))
+                })?;
+            *file_guard = Some((path, BufWriter::new(file)));
         }
 
         Ok(())
@@ -422,13 +455,16 @@ impl FileEventStore {
             return Ok(Vec::new());
         }
 
-        let file = File::open(path).await
+        let file = File::open(path)
+            .await
             .map_err(|e| EventStoreError::ReadFailed(format!("Failed to open events file: {e}")))?;
         let reader = BufReader::new(file);
         let mut lines = reader.lines();
         let mut events = Vec::new();
 
-        while let Some(line) = lines.next_line().await
+        while let Some(line) = lines
+            .next_line()
+            .await
             .map_err(|e| EventStoreError::ReadFailed(format!("Failed to read line: {e}")))?
         {
             if line.is_empty() {
@@ -445,11 +481,14 @@ impl FileEventStore {
     /// Returns all events files in order.
     async fn list_events_files(&self) -> EventStoreResult<Vec<PathBuf>> {
         let events_dir = self.data_dir.join("events");
-        let mut entries = fs::read_dir(&events_dir).await
+        let mut entries = fs::read_dir(&events_dir)
+            .await
             .map_err(|e| EventStoreError::ReadFailed(format!("Failed to read events dir: {e}")))?;
-        
+
         let mut files = Vec::new();
-        while let Some(entry) = entries.next_entry().await
+        while let Some(entry) = entries
+            .next_entry()
+            .await
             .map_err(|e| EventStoreError::ReadFailed(format!("Failed to read dir entry: {e}")))?
         {
             let path = entry.path();
@@ -457,7 +496,7 @@ impl FileEventStore {
                 files.push(path);
             }
         }
-        
+
         files.sort();
         Ok(files)
     }
@@ -468,22 +507,27 @@ impl EventStore for FileEventStore {
     async fn append(&mut self, mut event: Event) -> EventStoreResult<()> {
         let mut next_id = self.next_event_id.lock().await;
         event.event_id = *next_id;
-        
+
         // Ensure file is open
         self.get_current_file(event.event_id).await?;
 
         // Serialize and write
-        let line = serde_json::to_string(&event)
-            .map_err(|e| EventStoreError::AppendFailed(format!("Failed to serialize event: {e}")))?;
-        
+        let line = serde_json::to_string(&event).map_err(|e| {
+            EventStoreError::AppendFailed(format!("Failed to serialize event: {e}"))
+        })?;
+
         {
             let mut file_guard = self.current_file.lock().await;
-            if let Some(ref mut writer) = *file_guard {
-                writer.write_all(line.as_bytes()).await
-                    .map_err(|e| EventStoreError::AppendFailed(format!("Failed to write event: {e}")))?;
-                writer.write_all(b"\n").await
-                    .map_err(|e| EventStoreError::AppendFailed(format!("Failed to write newline: {e}")))?;
-                writer.flush().await
+            if let Some((_, ref mut writer)) = *file_guard {
+                writer.write_all(line.as_bytes()).await.map_err(|e| {
+                    EventStoreError::AppendFailed(format!("Failed to write event: {e}"))
+                })?;
+                writer.write_all(b"\n").await.map_err(|e| {
+                    EventStoreError::AppendFailed(format!("Failed to write newline: {e}"))
+                })?;
+                writer
+                    .flush()
+                    .await
                     .map_err(|e| EventStoreError::AppendFailed(format!("Failed to flush: {e}")))?;
             }
         }
@@ -498,7 +542,7 @@ impl EventStore for FileEventStore {
         }
 
         *next_id += 1;
-        
+
         // Periodically save metadata
         if *next_id % 100 == 0 {
             drop(next_id);
@@ -509,10 +553,17 @@ impl EventStore for FileEventStore {
     }
 
     async fn read_range(&self, from_id: u64, to_id: u64) -> EventStoreResult<Vec<Event>> {
+        if from_id > to_id {
+            return Err(EventStoreError::ReadFailed(format!(
+                "Invalid range: from_id ({from_id}) is greater than to_id ({to_id})"
+            )));
+        }
+
         // Check cache first
         {
             let cache = self.cache.lock().await;
-            let cached: Vec<Event> = cache.iter()
+            let cached: Vec<Event> = cache
+                .iter()
                 .filter(|e| e.event_id >= from_id && e.event_id <= to_id)
                 .cloned()
                 .collect();
@@ -580,7 +631,7 @@ impl EventStore for FileEventStore {
     async fn create_snapshot(&mut self, state: serde_json::Value) -> EventStoreResult<Snapshot> {
         let next_id = *self.next_event_id.lock().await;
         let event_id = next_id.saturating_sub(1);
-        
+
         let snapshot = Snapshot {
             event_id,
             timestamp: SystemTime::now(),
@@ -589,9 +640,11 @@ impl EventStore for FileEventStore {
 
         // Save to file
         let path = self.snapshot_path(event_id);
-        let content = serde_json::to_string_pretty(&snapshot)
-            .map_err(|e| EventStoreError::AppendFailed(format!("Failed to serialize snapshot: {e}")))?;
-        fs::write(&path, content).await
+        let content = serde_json::to_string_pretty(&snapshot).map_err(|e| {
+            EventStoreError::AppendFailed(format!("Failed to serialize snapshot: {e}"))
+        })?;
+        fs::write(&path, content)
+            .await
             .map_err(|e| EventStoreError::AppendFailed(format!("Failed to write snapshot: {e}")))?;
 
         tracing::info!("Created snapshot at event {event_id}");
@@ -604,11 +657,14 @@ impl EventStore for FileEventStore {
             return Ok(None);
         }
 
-        let mut entries = fs::read_dir(&snapshots_dir).await
-            .map_err(|e| EventStoreError::ReadFailed(format!("Failed to read snapshots dir: {e}")))?;
-        
+        let mut entries = fs::read_dir(&snapshots_dir).await.map_err(|e| {
+            EventStoreError::ReadFailed(format!("Failed to read snapshots dir: {e}"))
+        })?;
+
         let mut latest_path: Option<PathBuf> = None;
-        while let Some(entry) = entries.next_entry().await
+        while let Some(entry) = entries
+            .next_entry()
+            .await
             .map_err(|e| EventStoreError::ReadFailed(format!("Failed to read dir entry: {e}")))?
         {
             let path = entry.path();
@@ -623,8 +679,9 @@ impl EventStore for FileEventStore {
 
         match latest_path {
             Some(path) => {
-                let content = fs::read_to_string(&path).await
-                    .map_err(|e| EventStoreError::ReadFailed(format!("Failed to read snapshot: {e}")))?;
+                let content = fs::read_to_string(&path).await.map_err(|e| {
+                    EventStoreError::ReadFailed(format!("Failed to read snapshot: {e}"))
+                })?;
                 let snapshot: Snapshot = serde_json::from_str(&content)
                     .map_err(|e| EventStoreError::ReadFailed(format!("Invalid snapshot: {e}")))?;
                 Ok(Some(snapshot))
@@ -658,10 +715,10 @@ mod tests {
     #[tokio::test]
     async fn event_store_replay() {
         let mut store = InMemoryEventStore::new();
-        
+
         let event1 = Event::new(0, "increment", serde_json::json!({}));
         let event2 = Event::new(0, "increment", serde_json::json!({}));
-        
+
         store.append(event1).await.expect("append failed");
         store.append(event2).await.expect("append failed");
 
@@ -680,7 +737,10 @@ mod tests {
         store.append(event).await.expect("append failed");
 
         let state = serde_json::json!({"counter": 1});
-        let snapshot = store.create_snapshot(state.clone()).await.expect("snapshot failed");
+        let snapshot = store
+            .create_snapshot(state.clone())
+            .await
+            .expect("snapshot failed");
         assert_eq!(snapshot.event_id, 1);
 
         let loaded = store.load_snapshot().await.expect("load failed");
@@ -696,10 +756,14 @@ mod tests {
 
         {
             let mut store = FileEventStore::open(&temp_dir).await.expect("open failed");
-            
+
             let event1 = Event::new(0, "test.created", serde_json::json!({"id": 1}));
-            let event2 = Event::new(0, "test.updated", serde_json::json!({"id": 1, "value": "hello"}));
-            
+            let event2 = Event::new(
+                0,
+                "test.updated",
+                serde_json::json!({"id": 1, "value": "hello"}),
+            );
+
             store.append(event1).await.expect("append 1 failed");
             store.append(event2).await.expect("append 2 failed");
 
@@ -711,7 +775,9 @@ mod tests {
 
         // Reopen and verify persistence
         {
-            let store = FileEventStore::open(&temp_dir).await.expect("reopen failed");
+            let store = FileEventStore::open(&temp_dir)
+                .await
+                .expect("reopen failed");
             let events = store.read_from(1).await.expect("read failed");
             assert_eq!(events.len(), 2);
         }
@@ -731,7 +797,10 @@ mod tests {
             store.append(event).await.expect("append failed");
 
             let state = serde_json::json!({"version": 1, "data": [1, 2, 3]});
-            store.create_snapshot(state.clone()).await.expect("snapshot failed");
+            store
+                .create_snapshot(state.clone())
+                .await
+                .expect("snapshot failed");
 
             let loaded = store.load_snapshot().await.expect("load failed");
             assert!(loaded.is_some());
@@ -750,18 +819,23 @@ mod tests {
 
         {
             let mut store = FileEventStore::open(&temp_dir).await.expect("open failed");
-            
+
             for i in 1..=5 {
                 let event = Event::new(0, "add", serde_json::json!({"value": i}));
                 store.append(event).await.expect("append failed");
             }
 
-            let sum = store.replay(1, None, 0i64, |acc, event| {
-                let val = event.payload.get("value")
-                    .and_then(|v| v.as_i64())
-                    .unwrap_or(0);
-                acc + val
-            }).await.expect("replay failed");
+            let sum = store
+                .replay(1, None, 0i64, |acc, event| {
+                    let val = event
+                        .payload
+                        .get("value")
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(0);
+                    acc + val
+                })
+                .await
+                .expect("replay failed");
 
             assert_eq!(sum, 15); // 1+2+3+4+5
         }
@@ -780,4 +854,3 @@ mod tests {
         assert_eq!(event.source, Some("test-agent".to_string()));
     }
 }
-

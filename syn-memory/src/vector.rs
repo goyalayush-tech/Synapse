@@ -53,11 +53,7 @@ impl VectorEmbedding {
     /// # Errors
     ///
     /// Returns an error if the vector dimension is invalid.
-    pub fn new(
-        id: impl Into<String>,
-        vector: Vec<f32>,
-        expected_dim: usize,
-    ) -> VectorResult<Self> {
+    pub fn new(id: impl Into<String>, vector: Vec<f32>, expected_dim: usize) -> VectorResult<Self> {
         if vector.len() != expected_dim {
             return Err(VectorError::InvalidDimension {
                 expected: expected_dim,
@@ -203,7 +199,7 @@ impl VectorMemory for InMemoryVectorMemory {
             .collect();
 
         // Sort by similarity (descending) and take top_k
-        results.sort_by(|a, b| b.similarity.partial_cmp(&a.similarity).unwrap());
+        results.sort_by(|a, b| b.similarity.total_cmp(&a.similarity));
         results.truncate(top_k);
 
         Ok(results)
@@ -245,10 +241,7 @@ mod tests {
         memory.store(emb1).await.unwrap();
         memory.store(emb2).await.unwrap();
 
-        let results = memory
-            .search(&[1.0, 0.0, 0.0], 1, 0.0)
-            .await
-            .unwrap();
+        let results = memory.search(&[1.0, 0.0, 0.0], 1, 0.0).await.unwrap();
 
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].embedding.id, "emb-1");
@@ -265,4 +258,3 @@ mod tests {
         assert!(cosine_similarity(&a, &c).abs() < 0.001);
     }
 }
-

@@ -106,10 +106,7 @@ fn build_ebpf(release: bool) -> Result<()> {
         build_ebpf_native(&ebpf_dir, release)?;
     } else {
         // Docker-based build for Windows/macOS
-        println!(
-            "  {} Cross-platform build via Docker",
-            "→".cyan()
-        );
+        println!("  {} Cross-platform build via Docker", "→".cyan());
         build_ebpf_docker(&workspace_root, release)?;
     }
 
@@ -132,10 +129,7 @@ fn build_ebpf(release: bool) -> Result<()> {
 fn build_ebpf_native(ebpf_dir: &Path, release: bool) -> Result<()> {
     // Check for bpf-linker
     if which::which("bpf-linker").is_err() {
-        println!(
-            "  {} bpf-linker not found. Installing...",
-            "!".yellow()
-        );
+        println!("  {} bpf-linker not found. Installing...", "!".yellow());
         let status = Command::new("cargo")
             .args(["install", "bpf-linker"])
             .status()
@@ -153,7 +147,13 @@ fn build_ebpf_native(ebpf_dir: &Path, release: bool) -> Result<()> {
 
     // Use +nightly for eBPF builds (required for build-std)
     cmd.arg("+nightly");
-    cmd.args(["build", "--target", "bpfel-unknown-none", "-Z", "build-std=core"]);
+    cmd.args([
+        "build",
+        "--target",
+        "bpfel-unknown-none",
+        "-Z",
+        "build-std=core",
+    ]);
 
     if release {
         cmd.arg("--release");
@@ -237,10 +237,7 @@ fn codegen(btf_path: Option<PathBuf>) -> Result<()> {
 
     // Check for aya-tool
     if which::which("aya-tool").is_err() {
-        println!(
-            "  {} aya-tool not found. Installing...",
-            "!".yellow()
-        );
+        println!("  {} aya-tool not found. Installing...", "!".yellow());
         let status = Command::new("cargo")
             .args(["install", "aya-tool"])
             .status()
@@ -292,8 +289,7 @@ fn codegen(btf_path: Option<PathBuf>) -> Result<()> {
     }
 
     // Write bindings to file
-    std::fs::write(&output_path, &output.stdout)
-        .context("Failed to write bindings file")?;
+    std::fs::write(&output_path, &output.stdout).context("Failed to write bindings file")?;
 
     println!(
         "{} Bindings written to: {}",

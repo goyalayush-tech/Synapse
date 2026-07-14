@@ -51,8 +51,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use arrow_array::{
-    ArrayRef, Float32Array, Int64Array, RecordBatch, RecordBatchIterator, StringArray,
-    UInt64Array,
+    ArrayRef, Float32Array, Int64Array, RecordBatch, RecordBatchIterator, StringArray, UInt64Array,
 };
 use arrow_schema::{DataType, Field, Schema};
 use im::OrdMap;
@@ -165,7 +164,10 @@ impl LanceDbConfig {
 /// This struct is designed for both Arrow columnar storage and
 /// zero-copy deserialization via rkyv.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "zero-copy", derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize))]
+#[cfg_attr(
+    feature = "zero-copy",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
 #[cfg_attr(feature = "zero-copy", archive(check_bytes))]
 pub struct StoredEvent {
     /// Unique event ID
@@ -325,6 +327,15 @@ pub struct LanceDbStore {
     write_buffer: Arc<RwLock<WriteBuffer>>,
     /// Channel for background flush
     flush_tx: Option<mpsc::Sender<Vec<StoredEvent>>>,
+    /// Whether the "no real persistence" warning has already been logged
+    /// (logged once to avoid spamming on every flush).
+    persistence_warned: std::sync::atomic::AtomicBool,
+    /// Whether the "search results are not relevance-ranked" warning has
+    /// already been logged.
+    search_warned: std::sync::atomic::AtomicBool,
+    /// Whether the "no index is actually created" warning has already been
+    /// logged.
+    index_warned: std::sync::atomic::AtomicBool,
     // In production, this would hold:
     // db: lancedb::Database,
     // table: lancedb::Table,
@@ -356,6 +367,9 @@ impl LanceDbStore {
                 last_flush: SystemTime::now(),
             })),
             flush_tx: None,
+            persistence_warned: std::sync::atomic::AtomicBool::new(false),
+            search_warned: std::sync::atomic::AtomicBool::new(false),
+            index_warned: std::sync::atomic::AtomicBool::new(false),
         };
 
         Ok(store)
@@ -411,6 +425,18 @@ impl LanceDbStore {
         // For now, just log
         debug!("Flushed {} events (simulated)", events.len());
 
+        if !self
+            .persistence_warned
+            .swap(true, std::sync::atomic::Ordering::Relaxed)
+        {
+            tracing::error!(
+                "LanceDbStore::flush_batch does NOT actually persist data to LanceDB — \
+                 events are held only in the in-memory MemTable and write buffer, and \
+                 WILL BE LOST on process restart. Real LanceDB persistence is not yet \
+                 implemented in this build."
+            );
+        }
+
         Ok(())
     }
 
@@ -433,6 +459,18 @@ impl LanceDbStore {
         //     .limit(k)
         //     .execute()
         //     .await?;
+
+        if !self
+            .search_warned
+            .swap(true, std::sync::atomic::Ordering::Relaxed)
+        {
+            tracing::error!(
+                "LanceDbStore::vector_search does NOT compute results from the query \
+                 embedding — it returns the first `k` MemTable entries with a hardcoded \
+                 score/distance, ignoring `query_embedding` entirely. Results are NOT \
+                 relevance-ranked and MUST NOT be trusted for semantic search in this build."
+            );
+        }
 
         // For now, return events from memtable with simulated scores
         let memtable = self.memtable.read().await;
@@ -487,6 +525,18 @@ impl LanceDbStore {
         //     .await?;
 
         info!("Index created successfully (simulated)");
+
+        if !self
+            .index_warned
+            .swap(true, std::sync::atomic::Ordering::Relaxed)
+        {
+            tracing::error!(
+                "LanceDbStore::create_index does NOT actually build an IVF-PQ index — \
+                 this is a no-op in this build. Vector search will continue to perform \
+                 an unindexed, unranked scan of the MemTable."
+            );
+        }
+
         Ok(())
     }
 

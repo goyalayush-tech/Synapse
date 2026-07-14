@@ -17,6 +17,14 @@ pub struct AdminConfig {
     pub cluster_addr: String,
     /// Refresh interval for dashboard (seconds)
     pub refresh_interval: u64,
+    /// Allowed CORS origins for cross-origin API access.
+    ///
+    /// Empty by default, meaning no cross-origin requests are permitted
+    /// (same-origin only). Populate via `ADMIN_CORS_ORIGINS` with a
+    /// comma-separated list of origins (e.g.
+    /// `https://admin.example.com,https://ops.example.com`) to allow
+    /// specific origins to call the API.
+    pub cors_allowed_origins: Vec<String>,
 }
 
 impl Default for AdminConfig {
@@ -28,6 +36,7 @@ impl Default for AdminConfig {
             session_secret: "change-me-in-production".to_string(),
             cluster_addr: "127.0.0.1:9000".to_string(),
             refresh_interval: 5,
+            cors_allowed_origins: Vec::new(),
         }
     }
 }
@@ -51,6 +60,15 @@ impl AdminConfig {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(5),
+            cors_allowed_origins: env::var("ADMIN_CORS_ORIGINS")
+                .ok()
+                .map(|v| {
+                    v.split(',')
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect()
+                })
+                .unwrap_or_default(),
         }
     }
 }

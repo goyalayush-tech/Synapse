@@ -1,11 +1,11 @@
 //! Audit log API.
 
-use std::sync::Arc;
 use axum::{
     extract::{Query, State},
     Json,
 };
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 use crate::error::AdminResult;
 use crate::state::AppState;
@@ -64,11 +64,12 @@ pub async fn list_entries(
 ) -> Json<Vec<AuditEntryResponse>> {
     let limit = query.limit.unwrap_or(100);
     let offset = query.offset.unwrap_or(0);
-    
+
     let entries = state.enterprise.audit.list_entries(offset, limit).await;
-    
-    let responses: Vec<AuditEntryResponse> = entries.into_iter().map(|e| {
-        AuditEntryResponse {
+
+    let responses: Vec<AuditEntryResponse> = entries
+        .into_iter()
+        .map(|e| AuditEntryResponse {
             sequence: e.sequence,
             severity: format!("{:?}", e.event.severity),
             category: format!("{:?}", e.event.category),
@@ -78,9 +79,9 @@ pub async fn list_entries(
             details: e.event.details.clone(),
             timestamp: format_time(e.timestamp),
             hash: e.hash.clone(),
-        }
-    }).collect();
-    
+        })
+        .collect();
+
     Json(responses)
 }
 
@@ -92,11 +93,12 @@ pub async fn export_entries(
     // Same as list but typically returns more entries
     let limit = query.limit.unwrap_or(10000);
     let offset = query.offset.unwrap_or(0);
-    
+
     let entries = state.enterprise.audit.list_entries(offset, limit).await;
-    
-    let responses: Vec<AuditEntryResponse> = entries.into_iter().map(|e| {
-        AuditEntryResponse {
+
+    let responses: Vec<AuditEntryResponse> = entries
+        .into_iter()
+        .map(|e| AuditEntryResponse {
             sequence: e.sequence,
             severity: format!("{:?}", e.event.severity),
             category: format!("{:?}", e.event.category),
@@ -106,23 +108,25 @@ pub async fn export_entries(
             details: e.event.details.clone(),
             timestamp: format_time(e.timestamp),
             hash: e.hash.clone(),
-        }
-    }).collect();
-    
+        })
+        .collect();
+
     Json(responses)
 }
 
 /// Verify audit chain integrity.
-pub async fn verify_chain(
-    State(state): State<Arc<AppState>>,
-) -> AdminResult<Json<VerifyResponse>> {
+pub async fn verify_chain(State(state): State<Arc<AppState>>) -> AdminResult<Json<VerifyResponse>> {
     let stats = state.enterprise.audit.stats().await;
-    
+
     match state.enterprise.audit.verify_chain().await {
         Ok(is_valid) => Ok(Json(VerifyResponse {
             valid: is_valid,
             entries_count: stats.in_memory_entries,
-            error: if is_valid { None } else { Some("Chain integrity check failed".to_string()) },
+            error: if is_valid {
+                None
+            } else {
+                Some("Chain integrity check failed".to_string())
+            },
         })),
         Err(e) => Ok(Json(VerifyResponse {
             valid: false,
@@ -137,8 +141,7 @@ fn format_time(time: std::time::SystemTime) -> String {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default();
     let secs = duration.as_secs();
-    
-    let datetime = chrono::DateTime::from_timestamp(secs as i64, 0)
-        .unwrap_or_default();
+
+    let datetime = chrono::DateTime::from_timestamp(secs as i64, 0).unwrap_or_default();
     datetime.format("%Y-%m-%dT%H:%M:%SZ").to_string()
 }

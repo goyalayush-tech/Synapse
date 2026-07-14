@@ -43,7 +43,10 @@ pub mod embedder;
 pub mod crdt;
 
 #[cfg(feature = "event-sourcing")]
-pub use event_store::{Event, EventStore, EventStoreError, EventStoreResult, Snapshot, InMemoryEventStore, FileEventStore};
+pub use event_store::{
+    Event, EventStore, EventStoreError, EventStoreResult, FileEventStore, InMemoryEventStore,
+    Snapshot,
+};
 
 #[cfg(feature = "graph")]
 pub use graph::{GraphError, GraphQuery, GraphResult, KnowledgeGraph, Node, Relationship};
@@ -52,14 +55,27 @@ pub use graph::{GraphError, GraphQuery, GraphResult, KnowledgeGraph, Node, Relat
 pub use vector::{VectorError, VectorMemory, VectorResult};
 
 #[cfg(feature = "lance")]
-pub use lance::{LanceStore, LanceConfig, LanceError, LanceResult, IntentEvent, SearchResult, StoreStats};
+pub use lance::{
+    IntentEvent, LanceConfig, LanceError, LanceResult, LanceStore, SearchResult, StoreStats,
+};
 
 #[cfg(feature = "lance-full")]
-pub use lancedb::{LanceDbStore, LanceDbConfig, LanceDbError, LanceDbResult, StoredEvent, LanceSearchResult};
+pub use lancedb::{
+    LanceDbConfig, LanceDbError, LanceDbResult, LanceDbStore, LanceSearchResult, StoredEvent,
+};
 
 pub use consensus::{ConsensusError, ConsensusProtocol, ConsensusResult};
 pub use embedder::{Embedder, EmbedderConfig, EmbedderError, EmbedderResult};
 
-#[cfg(feature = "crdt")]
-pub use crdt::{CrdtBlackboard, CrdtConfig, CrdtError, CrdtResult, CrdtValue, DocumentId, SyncMessage, DocumentChange};
+// Real Candle-backed ML embedder (actual semantic inference). The default
+// `Embedder` above is a deterministic hash-based placeholder; callers who
+// need real semantic embeddings should enable the `vector` feature and use
+// `CandleEmbedder` instead.
+#[cfg(feature = "vector")]
+pub use embedder::candle_impl::CandleEmbedder;
 
+#[cfg(feature = "crdt")]
+pub use crdt::{
+    CrdtBlackboard, CrdtConfig, CrdtError, CrdtResult, CrdtValue, DocumentChange, DocumentId,
+    SyncMessage,
+};

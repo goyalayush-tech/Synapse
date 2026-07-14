@@ -19,10 +19,10 @@ use serde::{Deserialize, Serialize};
 pub enum Verdict {
     /// Event is allowed to proceed unchanged
     Allow,
-    
+
     /// Event is denied with a reason
     Deny(VerdictReason),
-    
+
     /// Event is transformed before proceeding
     Transform(TransformAction),
 }
@@ -32,7 +32,7 @@ impl Verdict {
     pub fn allow() -> Self {
         Self::Allow
     }
-    
+
     /// Create a deny verdict with a reason
     pub fn deny(reason: impl Into<String>) -> Self {
         Self::Deny(VerdictReason {
@@ -41,7 +41,7 @@ impl Verdict {
             policy_id: None,
         })
     }
-    
+
     /// Create a deny verdict with a specific code
     pub fn deny_with_code(code: impl Into<String>, message: impl Into<String>) -> Self {
         Self::Deny(VerdictReason {
@@ -50,22 +50,22 @@ impl Verdict {
             policy_id: None,
         })
     }
-    
+
     /// Create a transform verdict
     pub fn transform(action: TransformAction) -> Self {
         Self::Transform(action)
     }
-    
+
     /// Check if the verdict allows the event
     pub fn is_allowed(&self) -> bool {
         matches!(self, Self::Allow | Self::Transform(_))
     }
-    
+
     /// Check if the verdict denies the event
     pub fn is_denied(&self) -> bool {
         matches!(self, Self::Deny(_))
     }
-    
+
     /// Get the denial reason if denied
     pub fn denial_reason(&self) -> Option<&VerdictReason> {
         match self {
@@ -73,7 +73,7 @@ impl Verdict {
             _ => None,
         }
     }
-    
+
     /// Attach policy ID to the verdict
     pub fn with_policy(mut self, policy_id: impl Into<String>) -> Self {
         match &mut self {
@@ -143,7 +143,7 @@ impl TransformAction {
             policy_id: None,
         }
     }
-    
+
     /// Create a new transform action that modifies fields
     pub fn modify_fields() -> Self {
         Self {
@@ -154,19 +154,19 @@ impl TransformAction {
             policy_id: None,
         }
     }
-    
+
     /// Add a field to set
     pub fn set_field(mut self, key: impl Into<String>, value: serde_json::Value) -> Self {
         self.set_fields.push((key.into(), value));
         self
     }
-    
+
     /// Add a field to remove
     pub fn remove_field(mut self, key: impl Into<String>) -> Self {
         self.remove_fields.push(key.into());
         self
     }
-    
+
     /// Create a redact action
     pub fn redact(fields: Vec<String>) -> Self {
         Self {
@@ -195,7 +195,7 @@ pub enum TransformKind {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_verdict_allow() {
         let verdict = Verdict::allow();
@@ -203,18 +203,18 @@ mod tests {
         assert!(!verdict.is_denied());
         assert!(verdict.denial_reason().is_none());
     }
-    
+
     #[test]
     fn test_verdict_deny() {
         let verdict = Verdict::deny("Rate limit exceeded");
         assert!(!verdict.is_allowed());
         assert!(verdict.is_denied());
-        
+
         let reason = verdict.denial_reason().expect("should have reason");
         assert_eq!(reason.code, "POLICY_VIOLATION");
         assert_eq!(reason.message, "Rate limit exceeded");
     }
-    
+
     #[test]
     fn test_verdict_deny_with_code() {
         let verdict = Verdict::deny_with_code("RATE_LIMIT", "Too many requests");
@@ -222,31 +222,31 @@ mod tests {
         assert_eq!(reason.code, "RATE_LIMIT");
         assert_eq!(reason.message, "Too many requests");
     }
-    
+
     #[test]
     fn test_verdict_transform() {
         let action = TransformAction::modify_fields()
             .set_field("sanitized", serde_json::json!(true))
             .remove_field("secret");
-        
+
         let verdict = Verdict::transform(action);
         assert!(verdict.is_allowed());
         assert!(!verdict.is_denied());
     }
-    
+
     #[test]
     fn test_verdict_with_policy() {
         let verdict = Verdict::deny("test").with_policy("rate-limit-v1");
         let reason = verdict.denial_reason().expect("should have reason");
         assert_eq!(reason.policy_id, Some("rate-limit-v1".to_string()));
     }
-    
+
     #[test]
     fn test_verdict_serialization() {
         let verdict = Verdict::deny_with_code("AUTH_FAILED", "Invalid token");
         let json = serde_json::to_string(&verdict).expect("should serialize");
         let parsed: Verdict = serde_json::from_str(&json).expect("should deserialize");
-        
+
         let reason = parsed.denial_reason().expect("should have reason");
         assert_eq!(reason.code, "AUTH_FAILED");
     }

@@ -43,9 +43,31 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use thiserror::Error;
 use tokio::sync::RwLock;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::ebpf::Allowlist;
+
+/// Environment variable that must be set to `"1"` or `"true"` before
+/// [`EbpfIdentityProvider::attach`] will proceed.
+///
+/// This crate does not currently perform real eBPF loading or kernel-level
+/// attestation (see the SIMULATION warning logged by `attach()`). Requiring
+/// this explicit opt-in prevents a caller from silently getting
+/// simulated/mocked security behavior in place of real enforcement.
+pub const SIMULATED_IDENTITY_ENV: &str = "SYNAPSE_ALLOW_SIMULATED_IDENTITY";
+
+/// Returns true if the given environment variable is set to a value that
+/// counts as an affirmative opt-in (`"1"` or `"true"`, case-insensitive).
+#[cfg(target_os = "linux")]
+fn env_opt_in(var: &str) -> bool {
+    match std::env::var(var) {
+        Ok(val) => {
+            let val = val.trim();
+            val == "1" || val.eq_ignore_ascii_case("true")
+        }
+        Err(_) => false,
+    }
+}
 
 /// Errors from identity provider operations
 #[derive(Debug, Error)]
@@ -138,8 +160,14 @@ impl Default for IdentityProviderConfig {
 pub trait IdentityProvider: Send + Sync {
     /// Attach the identity provider to kernel hooks.
     ///
-    /// On Linux, this loads eBPF programs and attaches them to LSM/kprobe hooks.
-    /// On other platforms, this is a no-op.
+    /// **Current implementations are simulations.** Neither the Linux
+    /// `EbpfIdentityProvider` nor the non-Linux `MockIdentityProvider` load
+    /// real eBPF programs or perform kernel-level attestation today; both
+    /// just track an in-memory "trusted" PID set. On Linux, `attach()`
+    /// additionally requires the `SIMULATED_IDENTITY_ENV`
+    /// (`SYNAPSE_ALLOW_SIMULATED_IDENTITY`) environment variable to be
+    /// explicitly set to `"1"`/`"true"` before it will proceed, and returns
+    /// an error otherwise.
     async fn attach(&self) -> IdentityProviderResult<()>;
 
     /// Detach from kernel hooks.
@@ -228,7 +256,25 @@ impl EbpfIdentityProvider {
 #[async_trait]
 impl IdentityProvider for EbpfIdentityProvider {
     async fn attach(&self) -> IdentityProviderResult<()> {
-        info!("Attaching eBPF identity provider");
+        error!(
+            "EbpfIdentityProvider::attach() is a SIMULATION \u{2014} no eBPF program is loaded, \
+             no kernel-level attestation occurs. Do not rely on this for security in any \
+             environment."
+        );
+
+        // Require an explicit, informed opt-in before proceeding. Without this,
+        // a caller could end up with security-looking behavior (attach() returns
+        // Ok, is_attached() is true, verify_pid() reports "trusted") that is
+        // backed by nothing but an in-memory HashSet.
+        if !env_opt_in(SIMULATED_IDENTITY_ENV) {
+            return Err(IdentityProviderError::ConfigError(format!(
+                "EbpfIdentityProvider::attach() refused to proceed: this is a SIMULATED \
+                 identity provider with no real eBPF/kernel attestation. Set the {} \
+                 environment variable to \"1\" or \"true\" to explicitly opt into the \
+                 simulation (development/testing only \u{2014} never in production).",
+                SIMULATED_IDENTITY_ENV
+            )));
+        }
 
         // In a full implementation, this would:
         // 1. Load the synapse-ebpf bytecode from embedded bytes or file
@@ -245,8 +291,9 @@ impl IdentityProvider for EbpfIdentityProvider {
         let current_pid = std::process::id();
         self.trust_pid(current_pid).await?;
 
-        info!(
-            "eBPF identity provider attached, current PID {} trusted",
+        warn!(
+            "eBPF identity provider SIMULATED attach complete, current PID {} marked trusted \
+             (no real kernel verification was performed)",
             current_pid
         );
 

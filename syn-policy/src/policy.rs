@@ -12,10 +12,10 @@
 //! - Context-aware (policies receive rich context about the event)
 //! - Composable (policies can be chained)
 
-use std::sync::Arc;
-use std::time::{Duration, SystemTime};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+use std::time::{Duration, SystemTime};
 use thiserror::Error;
 
 use crate::verdict::Verdict;
@@ -29,19 +29,19 @@ pub enum PolicyError {
     /// Policy evaluation failed
     #[error("Policy evaluation failed: {0}")]
     EvaluationFailed(String),
-    
+
     /// Policy timed out
     #[error("Policy evaluation timed out after {0:?}")]
     Timeout(Duration),
-    
+
     /// Policy resource limit exceeded
     #[error("Policy resource limit exceeded: {0}")]
     ResourceLimit(String),
-    
+
     /// Invalid policy configuration
     #[error("Invalid policy configuration: {0}")]
     InvalidConfig(String),
-    
+
     /// Policy not found
     #[error("Policy not found: {0}")]
     NotFound(String),
@@ -95,37 +95,37 @@ impl PolicyMetadata {
             priority: 0,
         }
     }
-    
+
     /// Set the version
     pub fn with_version(mut self, version: impl Into<String>) -> Self {
         self.version = version.into();
         self
     }
-    
+
     /// Set the description
     pub fn with_description(mut self, description: impl Into<String>) -> Self {
         self.description = description.into();
         self
     }
-    
+
     /// Set the author
     pub fn with_author(mut self, author: impl Into<String>) -> Self {
         self.author = Some(author.into());
         self
     }
-    
+
     /// Add a tag
     pub fn with_tag(mut self, tag: impl Into<String>) -> Self {
         self.tags.push(tag.into());
         self
     }
-    
+
     /// Set the timeout
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
         self
     }
-    
+
     /// Set the priority
     pub fn with_priority(mut self, priority: i32) -> Self {
         self.priority = priority;
@@ -165,31 +165,31 @@ impl PolicyContext {
             previous_verdicts: Vec::new(),
         }
     }
-    
+
     /// Set the action
     pub fn with_action(mut self, action: impl Into<String>) -> Self {
         self.action = action.into();
         self
     }
-    
+
     /// Set the payload
     pub fn with_payload(mut self, payload: impl Into<String>) -> Self {
         self.payload = payload.into();
         self
     }
-    
+
     /// Set the timestamp
     pub fn with_timestamp(mut self, timestamp_us: u64) -> Self {
         self.timestamp_us = timestamp_us;
         self
     }
-    
+
     /// Set metadata
     pub fn with_metadata(mut self, metadata: serde_json::Value) -> Self {
         self.metadata = metadata;
         self
     }
-    
+
     /// Add a previous verdict
     pub fn add_verdict(mut self, policy_id: PolicyId, verdict: Verdict) -> Self {
         self.previous_verdicts.push((policy_id, verdict));
@@ -232,18 +232,18 @@ impl PolicyContext {
 pub trait Policy: Send + Sync {
     /// Get policy metadata
     fn metadata(&self) -> &PolicyMetadata;
-    
+
     /// Evaluate the policy against an event context
     ///
     /// Returns a verdict indicating whether the event is allowed,
     /// denied, or should be transformed.
     async fn evaluate(&self, ctx: &PolicyContext) -> PolicyResult<Verdict>;
-    
+
     /// Called when the policy is loaded
     async fn on_load(&self) -> PolicyResult<()> {
         Ok(())
     }
-    
+
     /// Called when the policy is unloaded
     async fn on_unload(&self) -> PolicyResult<()> {
         Ok(())
@@ -277,7 +277,7 @@ impl Policy for AllowAllPolicy {
     fn metadata(&self) -> &PolicyMetadata {
         &self.metadata
     }
-    
+
     async fn evaluate(&self, _ctx: &PolicyContext) -> PolicyResult<Verdict> {
         Ok(Verdict::allow())
     }
@@ -306,7 +306,7 @@ impl Policy for DenyAllPolicy {
     fn metadata(&self) -> &PolicyMetadata {
         &self.metadata
     }
-    
+
     async fn evaluate(&self, _ctx: &PolicyContext) -> PolicyResult<Verdict> {
         Ok(Verdict::deny(&self.reason))
     }
@@ -335,7 +335,7 @@ impl Policy for ActionFilterPolicy {
     fn metadata(&self) -> &PolicyMetadata {
         &self.metadata
     }
-    
+
     async fn evaluate(&self, ctx: &PolicyContext) -> PolicyResult<Verdict> {
         if self.allowed_actions.contains(&ctx.action) {
             Ok(Verdict::allow())
@@ -371,9 +371,13 @@ impl Policy for SourceFilterPolicy {
     fn metadata(&self) -> &PolicyMetadata {
         &self.metadata
     }
-    
+
     async fn evaluate(&self, ctx: &PolicyContext) -> PolicyResult<Verdict> {
-        if self.allowed_sources.iter().any(|s| ctx.source.starts_with(s)) {
+        if self
+            .allowed_sources
+            .iter()
+            .any(|s| ctx.source.starts_with(s))
+        {
             Ok(Verdict::allow())
         } else {
             Ok(Verdict::deny_with_code(
@@ -412,7 +416,7 @@ impl PolicyChain {
             fail_fast: true,
         }
     }
-    
+
     /// Set fail-fast behavior
     pub fn with_fail_fast(mut self, fail_fast: bool) -> Self {
         self.fail_fast = fail_fast;
@@ -425,26 +429,47 @@ impl Policy for PolicyChain {
     fn metadata(&self) -> &PolicyMetadata {
         &self.metadata
     }
-    
+
     async fn evaluate(&self, ctx: &PolicyContext) -> PolicyResult<Verdict> {
         let mut ctx = ctx.clone();
-        
+
+        // Track the first Deny verdict seen when `fail_fast` is false: we
+        // still need to evaluate every policy in that mode (to collect all
+        // verdicts in `ctx`), but the chain as a whole must still deny if
+        // ANY policy denied. Previously this was tracked nowhere, so a
+        // non-fail-fast chain always returned `Verdict::allow()` even when
+        // a policy in the middle had denied.
+        let mut first_denial: Option<Verdict> = None;
+
         for policy in &self.policies {
             if !policy.metadata().enabled {
                 continue;
             }
-            
+
             let verdict = policy.evaluate(&ctx).await?;
             let policy_id = policy.metadata().id.clone();
-            
-            if self.fail_fast && verdict.is_denied() {
-                return Ok(verdict.with_policy(policy_id));
+
+            if verdict.is_denied() {
+                let verdict = verdict.with_policy(policy_id.clone());
+                if self.fail_fast {
+                    return Ok(verdict);
+                }
+                if first_denial.is_none() {
+                    first_denial = Some(verdict.clone());
+                }
+                ctx = ctx.add_verdict(policy_id, verdict);
+                continue;
             }
-            
+
             ctx = ctx.add_verdict(policy_id, verdict);
         }
-        
-        // If we got here, all policies allowed
+
+        // In fail_fast=false mode, deny overall if any policy in the chain
+        // denied; only allow if every policy allowed.
+        if let Some(denial) = first_denial {
+            return Ok(denial);
+        }
+
         Ok(Verdict::allow())
     }
 }
@@ -452,21 +477,21 @@ impl Policy for PolicyChain {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[tokio::test]
     async fn test_allow_all_policy() {
         let policy = AllowAllPolicy::new();
         let ctx = PolicyContext::new(1, "test-source");
-        
+
         let verdict = policy.evaluate(&ctx).await.expect("should succeed");
         assert!(verdict.is_allowed());
     }
-    
+
     #[tokio::test]
     async fn test_deny_all_policy() {
         let policy = DenyAllPolicy::new("System maintenance");
         let ctx = PolicyContext::new(1, "test-source");
-        
+
         let verdict = policy.evaluate(&ctx).await.expect("should succeed");
         assert!(verdict.is_denied());
         assert_eq!(
@@ -474,60 +499,91 @@ mod tests {
             "System maintenance"
         );
     }
-    
+
     #[tokio::test]
     async fn test_action_filter_policy() {
         let policy = ActionFilterPolicy::new(vec!["read".to_string(), "list".to_string()]);
-        
+
         // Allowed action
         let ctx = PolicyContext::new(1, "test").with_action("read");
         let verdict = policy.evaluate(&ctx).await.expect("should succeed");
         assert!(verdict.is_allowed());
-        
+
         // Denied action
         let ctx = PolicyContext::new(2, "test").with_action("delete");
         let verdict = policy.evaluate(&ctx).await.expect("should succeed");
         assert!(verdict.is_denied());
     }
-    
+
     #[tokio::test]
     async fn test_source_filter_policy() {
         let policy = SourceFilterPolicy::new(vec!["agent-".to_string(), "system-".to_string()]);
-        
+
         // Allowed source
         let ctx = PolicyContext::new(1, "agent-001");
         let verdict = policy.evaluate(&ctx).await.expect("should succeed");
         assert!(verdict.is_allowed());
-        
+
         // Denied source
         let ctx = PolicyContext::new(2, "unknown-source");
         let verdict = policy.evaluate(&ctx).await.expect("should succeed");
         assert!(verdict.is_denied());
     }
-    
+
     #[tokio::test]
     async fn test_policy_chain() {
-        let chain = PolicyChain::new("test-chain", vec![
-            Arc::new(SourceFilterPolicy::new(vec!["agent-".to_string()])),
-            Arc::new(ActionFilterPolicy::new(vec!["read".to_string()])),
-        ]);
-        
+        let chain = PolicyChain::new(
+            "test-chain",
+            vec![
+                Arc::new(SourceFilterPolicy::new(vec!["agent-".to_string()])),
+                Arc::new(ActionFilterPolicy::new(vec!["read".to_string()])),
+            ],
+        );
+
         // Both pass
         let ctx = PolicyContext::new(1, "agent-001").with_action("read");
         let verdict = chain.evaluate(&ctx).await.expect("should succeed");
         assert!(verdict.is_allowed());
-        
+
         // Source fails
         let ctx = PolicyContext::new(2, "unknown").with_action("read");
         let verdict = chain.evaluate(&ctx).await.expect("should succeed");
         assert!(verdict.is_denied());
-        
+
         // Action fails
         let ctx = PolicyContext::new(3, "agent-001").with_action("delete");
         let verdict = chain.evaluate(&ctx).await.expect("should succeed");
         assert!(verdict.is_denied());
     }
-    
+
+    #[tokio::test]
+    async fn test_policy_chain_fail_fast_false_denies_on_any_deny() {
+        // fail_fast=false must still evaluate every policy, but the chain
+        // as a whole must deny if ANY policy denied — not unconditionally
+        // allow just because it ran to completion.
+        let chain = PolicyChain::new(
+            "test-chain-no-fail-fast",
+            vec![
+                Arc::new(SourceFilterPolicy::new(vec!["agent-".to_string()])),
+                Arc::new(ActionFilterPolicy::new(vec!["read".to_string()])),
+            ],
+        )
+        .with_fail_fast(false);
+
+        // Source policy allows, action policy denies ("write" not in allowed list).
+        let ctx = PolicyContext::new(1, "agent-001").with_action("write");
+        let verdict = chain.evaluate(&ctx).await.expect("should succeed");
+        assert!(
+            verdict.is_denied(),
+            "chain should deny overall when any policy in it denies, even with fail_fast=false"
+        );
+
+        // Both policies allow: chain should allow overall.
+        let ctx = PolicyContext::new(2, "agent-001").with_action("read");
+        let verdict = chain.evaluate(&ctx).await.expect("should succeed");
+        assert!(verdict.is_allowed());
+    }
+
     #[test]
     fn test_policy_metadata() {
         let meta = PolicyMetadata::new("test-policy", "Test Policy")
@@ -536,7 +592,7 @@ mod tests {
             .with_author("Test Author")
             .with_tag("test")
             .with_priority(10);
-        
+
         assert_eq!(meta.id, "test-policy");
         assert_eq!(meta.version, "2.0.0");
         assert_eq!(meta.author, Some("Test Author".to_string()));

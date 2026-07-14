@@ -104,4 +104,3 @@ mod tests {
         assert_eq!(program.interface, "eth0");
     }
 }
-

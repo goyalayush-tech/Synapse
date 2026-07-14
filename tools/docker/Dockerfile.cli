@@ -7,7 +7,14 @@ WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
 COPY syn-core ./syn-core
 COPY syn-proto ./syn-proto
+COPY syn-proxy ./syn-proxy
 COPY syn-cli ./syn-cli
+COPY syn-identity ./syn-identity
+COPY syn-network ./syn-network
+COPY syn-memory ./syn-memory
+COPY syn-policy ./syn-policy
+COPY syn-admin ./syn-admin
+COPY xtask ./xtask
 
 # Build the CLI
 RUN cargo build --release --bin syn

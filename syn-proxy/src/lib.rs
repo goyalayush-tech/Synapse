@@ -56,4 +56,3 @@ pub use server::ProxyServer;
 
 #[cfg(feature = "agentic-mesh")]
 pub use node::{NodeConfig, NodeMetrics, SynapseNode};
-

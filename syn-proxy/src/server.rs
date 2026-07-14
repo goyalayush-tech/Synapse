@@ -107,7 +107,7 @@ impl ProxyServer {
                         Ok(stream) => {
                             let state = self.state.clone();
                             let mut shutdown_rx = shutdown_tx.subscribe();
-                            
+
                             // Update connection counters
                             let conn_id = {
                                 let mut s = state.write().await;
@@ -115,9 +115,9 @@ impl ProxyServer {
                                 s.total_connections += 1;
                                 s.total_connections
                             };
-                            
+
                             tracing::debug!(conn_id, "Accepted control connection");
-                            
+
                             // Emit connection event
                             #[cfg(feature = "memory")]
                             {
@@ -128,32 +128,50 @@ impl ProxyServer {
                                 });
                                 server.emit_event("connection.accepted", event_payload).await;
                             }
-                            
+
                             // Handle the connection in a separate task
                             #[cfg(feature = "memory")]
                             let event_store_clone = Some(self.event_store.clone());
-                            
-                            tokio::spawn(async move {
+
+                            let handler_state = state.clone();
+                            let handle = tokio::spawn(async move {
                                 #[cfg(feature = "memory")]
                                 let result = handle_control_connection(
-                                    stream, 
-                                    state.clone(), 
+                                    stream,
+                                    handler_state,
                                     &mut shutdown_rx,
                                     event_store_clone,
                                 ).await;
                                 #[cfg(not(feature = "memory"))]
                                 let result = handle_control_connection(
-                                    stream, 
-                                    state.clone(), 
+                                    stream,
+                                    handler_state,
                                     &mut shutdown_rx,
                                 ).await;
-                                
+
+                                result
+                            });
+
+                            // Supervise the handler from a separate task so the
+                            // active-connection counter is always decremented,
+                            // even if the handler panics (e.g. a downstream
+                            // parsing bug). Code placed *after* the handler's
+                            // `.await` inside the same task would never run on
+                            // panic, since the panic unwinds that task before
+                            // reaching it - leaking the counter forever.
+                            tokio::spawn(async move {
+                                match handle.await {
+                                    Ok(Ok(())) => {}
+                                    Ok(Err(e)) => {
+                                        tracing::warn!(conn_id, error = %e, "Control connection error");
+                                    }
+                                    Err(join_err) => {
+                                        tracing::error!(conn_id, error = %join_err, "Control connection task panicked");
+                                    }
+                                }
+
                                 // Decrement active connections
                                 state.write().await.active_connections -= 1;
-                                
-                                if let Err(e) = result {
-                                    tracing::warn!(conn_id, error = %e, "Control connection error");
-                                }
                             });
                         }
                         Err(e) => {
@@ -161,7 +179,7 @@ impl ProxyServer {
                         }
                     }
                 }
-                
+
                 // Handle shutdown signal (Ctrl+C)
                 _ = tokio::signal::ctrl_c() => {
                     tracing::info!("Received shutdown signal");
@@ -204,8 +222,7 @@ async fn handle_control_connection(
     stream: Box<dyn crate::net::ConnectionStream>,
     state: Arc<RwLock<ServerState>>,
     shutdown_rx: &mut broadcast::Receiver<()>,
-    #[cfg(feature = "memory")]
-    event_store: Option<Arc<RwLock<Box<dyn EventStore>>>>,
+    #[cfg(feature = "memory")] event_store: Option<Arc<RwLock<Box<dyn EventStore>>>>,
 ) -> Result<()> {
     // Split into read/write halves
     let (reader, mut writer) = tokio::io::split(stream);
@@ -225,7 +242,7 @@ async fn handle_control_connection(
                 }
 
                 // Parse and handle the command
-                let response = match ControlCommand::from_json(line.trim().as_bytes()) {
+                let (is_shutdown, response) = match ControlCommand::from_json(line.trim().as_bytes()) {
                     Ok(cmd) => {
                         // Emit command event
                         #[cfg(feature = "memory")]
@@ -241,12 +258,24 @@ async fn handle_control_connection(
                                 let _ = store.write().await.append(event).await;
                             }
                         }
-                        
-                        handle_command(cmd, &state).await
+
+                        // Capture whether this was a Shutdown command before
+                        // `cmd` is moved into `handle_command` below - the
+                        // strongly-typed variant is the source of truth for
+                        // shutdown detection, not a substring search over the
+                        // raw request text (which could false-positive on
+                        // e.g. a command argument that merely contains the
+                        // word "shutdown").
+                        let is_shutdown = matches!(cmd, ControlCommand::Shutdown);
+                        let response = handle_command(cmd, &state).await;
+                        (is_shutdown, response)
                     }
-                    Err(e) => ControlResponse::Error {
-                        message: format!("Invalid command: {e}"),
-                    },
+                    Err(e) => (
+                        false,
+                        ControlResponse::Error {
+                            message: format!("Invalid command: {e}"),
+                        },
+                    ),
                 };
 
                 // Send response
@@ -255,8 +284,8 @@ async fn handle_control_connection(
                 writer.write_all(&response_bytes).await.context("Write response")?;
                 writer.flush().await?;
 
-                // If shutdown was requested, signal and exit
-                if matches!(response, ControlResponse::Ok) && line.contains("shutdown") {
+                // If shutdown was requested and actually acknowledged, signal and exit
+                if is_shutdown && matches!(response, ControlResponse::Ok) {
                     state.write().await.accepting = false;
                     break;
                 }
@@ -294,7 +323,9 @@ async fn handle_command(cmd: ControlCommand, state: &RwLock<ServerState>) -> Con
         ControlCommand::Reload => {
             tracing::info!("Configuration reload requested");
             // TODO: Implement actual config reload
-            ControlResponse::Ok
+            ControlResponse::Error {
+                message: "Config reload not implemented yet".to_string(),
+            }
         }
 
         ControlCommand::Shutdown => {

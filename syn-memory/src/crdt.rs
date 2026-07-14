@@ -30,16 +30,20 @@
 //! - **Conflict History**: Track and visualize merge conflicts
 
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use thiserror::Error;
-use tokio::sync::{RwLock, mpsc, broadcast};
-use tracing::{debug, info, instrument, warn, error};
+use tokio::sync::{broadcast, mpsc, RwLock};
+use tracing::{debug, error, info, instrument, warn};
 
 #[cfg(feature = "crdt")]
-use automerge::{AutoCommit, ObjType, ReadDoc, ScalarValue, transaction::Transactable};
+use automerge::hydrate::Value as HydrateValue;
 #[cfg(feature = "crdt")]
 use automerge::sync::SyncDoc;
+#[cfg(feature = "crdt")]
+use automerge::{
+    transaction::Transactable, AutoCommit, ObjId as ExId, ObjType, ReadDoc, ScalarValue,
+};
 
 /// Errors from CRDT operations
 #[derive(Debug, Error)]
@@ -185,10 +189,7 @@ pub enum SyncEvent {
     /// Conflict detected
     ConflictDetected(ConflictInfo),
     /// Sync error occurred
-    SyncError {
-        peer_id: String,
-        error: String,
-    },
+    SyncError { peer_id: String, error: String },
 }
 
 /// Configuration for distributed CRDT sync
@@ -211,10 +212,10 @@ pub struct DistributedSyncConfig {
 impl Default for DistributedSyncConfig {
     fn default() -> Self {
         Self {
-            sync_interval_ms: 1000,       // 1 second
-            discovery_interval_ms: 5000,  // 5 seconds
+            sync_interval_ms: 1000,      // 1 second
+            discovery_interval_ms: 5000, // 5 seconds
             max_peers: 10,
-            sync_timeout_ms: 5000,        // 5 seconds
+            sync_timeout_ms: 5000, // 5 seconds
             enable_gossip: true,
             seed_peers: Vec::new(),
         }
@@ -248,6 +249,13 @@ impl DistributedSyncManager {
         let (event_tx, event_rx) = broadcast::channel(100);
         let (shutdown_tx, _shutdown_rx) = mpsc::channel(1);
 
+        warn!(
+            "DistributedSyncManager has no real network transport in this build: \
+             sync_with_peer/sync_all only generate automerge sync messages locally and \
+             never send them over the network to a remote peer. No data is actually \
+             exchanged with remote peers."
+        );
+
         (
             Self {
                 blackboard,
@@ -267,7 +275,7 @@ impl DistributedSyncManager {
         let mut peers = self.peers.write().await;
         info!("Adding peer: {} at {}", peer.id, peer.addr);
         peers.insert(peer.id.clone(), peer.clone());
-        
+
         let _ = self.event_tx.send(SyncEvent::PeerDiscovered(peer));
         Ok(())
     }
@@ -278,7 +286,9 @@ impl DistributedSyncManager {
         let mut peers = self.peers.write().await;
         if peers.remove(peer_id).is_some() {
             info!("Removed peer: {}", peer_id);
-            let _ = self.event_tx.send(SyncEvent::PeerDisconnected(peer_id.to_string()));
+            let _ = self
+                .event_tx
+                .send(SyncEvent::PeerDisconnected(peer_id.to_string()));
         }
         Ok(())
     }
@@ -297,17 +307,24 @@ impl DistributedSyncManager {
         peer_id: &str,
     ) -> CrdtResult<SyncStats> {
         let peers = self.peers.read().await;
-        let _peer = peers.get(peer_id)
+        let _peer = peers
+            .get(peer_id)
             .ok_or_else(|| CrdtError::PeerConnectionFailed(format!("Unknown peer: {}", peer_id)))?;
 
         // Generate sync message
-        let msg = self.blackboard.generate_sync_message(doc_id, peer_id).await?;
-        
+        let msg = self
+            .blackboard
+            .generate_sync_message(doc_id, peer_id)
+            .await?;
+
         let bytes_sent = msg.as_ref().map(|m| m.payload.len()).unwrap_or(0);
-        
+
         // In a real implementation, this would send the message over the network
         // and receive a response. For now, we simulate local sync.
-        debug!("Generated sync message for peer {}: {} bytes", peer_id, bytes_sent);
+        debug!(
+            "Generated sync message for peer {}: {} bytes",
+            peer_id, bytes_sent
+        );
 
         let stats = SyncStats {
             messages_sent: if msg.is_some() { 1 } else { 0 },
@@ -361,9 +378,11 @@ impl DistributedSyncManager {
     /// Record a conflict for visualization
     pub async fn record_conflict(&self, conflict: ConflictInfo) {
         let mut conflicts = self.conflicts.write().await;
-        let _ = self.event_tx.send(SyncEvent::ConflictDetected(conflict.clone()));
+        let _ = self
+            .event_tx
+            .send(SyncEvent::ConflictDetected(conflict.clone()));
         conflicts.push(conflict);
-        
+
         // Keep only last 1000 conflicts
         if conflicts.len() > 1000 {
             conflicts.remove(0);
@@ -510,6 +529,134 @@ fn uuid_simple() -> String {
     format!("{:x}", nanos)
 }
 
+// ============================================================================
+// Recursive nested Map/List support for automerge documents
+// ============================================================================
+//
+// automerge stores nested Maps/Lists as their own sub-objects addressed by
+// an `ExId`. To read a nested object we need to recursively walk it (via
+// `ReadDoc::hydrate`, which returns a fully-materialized `hydrate::Value`
+// tree) and to write one we need to recursively create sub-objects (via
+// `Transactable::put_object`/`insert_object`) and populate them.
+
+/// Recursively convert a fully-hydrated automerge value into a [`CrdtValue`].
+#[cfg(feature = "crdt")]
+fn from_hydrate_value(value: HydrateValue) -> CrdtValue {
+    match value {
+        HydrateValue::Scalar(sv) => CrdtValue::from(&sv),
+        HydrateValue::Map(map) => {
+            let mut out = HashMap::new();
+            for (key, map_value) in map.iter() {
+                out.insert(key.clone(), from_hydrate_value(map_value.value.clone()));
+            }
+            CrdtValue::Map(out)
+        }
+        HydrateValue::List(list) => {
+            let items = list
+                .iter()
+                .map(|list_value| from_hydrate_value(list_value.value.clone()))
+                .collect();
+            CrdtValue::List(items)
+        }
+        HydrateValue::Text(text) => CrdtValue::String(text.to_string()),
+    }
+}
+
+/// Recursively write a [`CrdtValue`] at map key `key` of object `obj`.
+///
+/// Scalars are written directly via `put`. `Map`/`List` values create a
+/// real nested automerge sub-object via `put_object` and recurse into it,
+/// so nested writes are symmetric with the recursive reads performed by
+/// [`from_hydrate_value`] / `CrdtBlackboard::get`.
+#[cfg(feature = "crdt")]
+fn put_map_value(doc: &mut AutoCommit, obj: &ExId, key: &str, value: CrdtValue) -> CrdtResult<()> {
+    match value {
+        CrdtValue::Null => {
+            doc.delete(obj, key)?;
+        }
+        CrdtValue::Bool(b) => {
+            doc.put(obj, key, b)?;
+        }
+        CrdtValue::Int(n) => {
+            doc.put(obj, key, n)?;
+        }
+        CrdtValue::Uint(n) => {
+            doc.put(obj, key, n as i64)?; // Automerge uses i64
+        }
+        CrdtValue::Float(f) => {
+            doc.put(obj, key, f)?;
+        }
+        CrdtValue::String(s) => {
+            doc.put(obj, key, s)?;
+        }
+        CrdtValue::Bytes(b) => {
+            doc.put(obj, key, b)?;
+        }
+        CrdtValue::Map(map) => {
+            let child = doc.put_object(obj, key, ObjType::Map)?;
+            for (k, v) in map {
+                put_map_value(doc, &child, &k, v)?;
+            }
+        }
+        CrdtValue::List(list) => {
+            let child = doc.put_object(obj, key, ObjType::List)?;
+            for (i, v) in list.into_iter().enumerate() {
+                insert_list_value(doc, &child, i, v)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Recursively write a [`CrdtValue`] at list index `index` of object `obj`.
+///
+/// Mirrors [`put_map_value`] but uses `insert`/`insert_object` since list
+/// elements are addressed by position rather than by key.
+#[cfg(feature = "crdt")]
+fn insert_list_value(
+    doc: &mut AutoCommit,
+    obj: &ExId,
+    index: usize,
+    value: CrdtValue,
+) -> CrdtResult<()> {
+    match value {
+        CrdtValue::Null => {
+            doc.insert(obj, index, ScalarValue::Null)?;
+        }
+        CrdtValue::Bool(b) => {
+            doc.insert(obj, index, b)?;
+        }
+        CrdtValue::Int(n) => {
+            doc.insert(obj, index, n)?;
+        }
+        CrdtValue::Uint(n) => {
+            doc.insert(obj, index, n as i64)?;
+        }
+        CrdtValue::Float(f) => {
+            doc.insert(obj, index, f)?;
+        }
+        CrdtValue::String(s) => {
+            doc.insert(obj, index, s)?;
+        }
+        CrdtValue::Bytes(b) => {
+            doc.insert(obj, index, b)?;
+        }
+        CrdtValue::Map(map) => {
+            let child = doc.insert_object(obj, index, ObjType::Map)?;
+            for (k, v) in map {
+                put_map_value(doc, &child, &k, v)?;
+            }
+        }
+        CrdtValue::List(list) => {
+            let child = doc.insert_object(obj, index, ObjType::List)?;
+            for (i, v) in list.into_iter().enumerate() {
+                insert_list_value(doc, &child, i, v)?;
+            }
+        }
+    }
+    Ok(())
+}
+
 /// The CRDT Blackboard - a multi-agent collaborative state store
 ///
 /// This is the "Short-Term Memory" of Synapse, allowing multiple agents
@@ -569,7 +716,8 @@ impl CrdtBlackboard {
             .ok_or_else(|| CrdtError::DocumentNotFound(doc_id.0.clone()))?;
 
         // Navigate to parent, creating intermediate maps as needed
-        let data_obj = doc.get(automerge::ROOT, "data")?
+        let data_obj = doc
+            .get(automerge::ROOT, "data")?
             .ok_or_else(|| CrdtError::InvalidPath("Root data object not found".into()))?
             .1;
 
@@ -587,40 +735,19 @@ impl CrdtBlackboard {
             }
         }
 
-        // Set the final value
+        // Set the final value. `put_map_value` handles scalars directly via
+        // `put`/`delete` and recursively creates nested automerge
+        // sub-objects for `CrdtValue::Map`/`CrdtValue::List`, so nested
+        // writes are fully supported (symmetric with the recursive reads in
+        // `get()`).
         let final_key = path[path.len() - 1];
-        match value {
-            CrdtValue::Null => {
-                doc.delete(&current, final_key)?;
-            }
-            CrdtValue::Bool(b) => {
-                doc.put(&current, final_key, b)?;
-            }
-            CrdtValue::Int(n) => {
-                doc.put(&current, final_key, n)?;
-            }
-            CrdtValue::Uint(n) => {
-                doc.put(&current, final_key, n as i64)?; // Automerge uses i64
-            }
-            CrdtValue::Float(f) => {
-                doc.put(&current, final_key, f)?;
-            }
-            CrdtValue::String(s) => {
-                doc.put(&current, final_key, s)?;
-            }
-            CrdtValue::Bytes(b) => {
-                doc.put(&current, final_key, b)?;
-            }
-            CrdtValue::List(_) | CrdtValue::Map(_) => {
-                // For complex types, we'd need recursive handling
-                warn!("Complex nested types not yet supported in set()");
-                return Err(CrdtError::Serialization(
-                    "Complex nested types require put_object".into(),
-                ));
-            }
-        }
+        put_map_value(doc, &current, final_key, value)?;
 
-        debug!("Set value at path {:?} in document {}", path, doc_id.as_str());
+        debug!(
+            "Set value at path {:?} in document {}",
+            path,
+            doc_id.as_str()
+        );
         Ok(())
     }
 
@@ -656,12 +783,24 @@ impl CrdtBlackboard {
         // Get the final value
         let final_key = path[path.len() - 1];
         match doc.get(&current, final_key)? {
-            Some((value, _)) => {
+            Some((value, obj_id)) => {
                 let crdt_value = match value {
                     automerge::Value::Scalar(sv) => CrdtValue::from(sv.as_ref()),
                     automerge::Value::Object(_) => {
-                        // For now, return a placeholder for objects
-                        CrdtValue::Map(HashMap::new())
+                        // Nested Map/List: fully resolve the nested object
+                        // via automerge's `hydrate` API, which recursively
+                        // materializes the sub-object tree, and convert it
+                        // into a real (non-placeholder) `CrdtValue`.
+                        match doc.hydrate(&obj_id, None) {
+                            Ok(hydrated) => from_hydrate_value(hydrated),
+                            Err(e) => {
+                                warn!(
+                                    "Failed to hydrate nested object at path {:?} in document {}: {} — returning empty placeholder",
+                                    path, doc_id.as_str(), e
+                                );
+                                CrdtValue::Map(HashMap::new())
+                            }
+                        }
                     }
                 };
                 Ok(Some(crdt_value))
@@ -701,7 +840,10 @@ impl CrdtBlackboard {
 
     /// Receive and apply a sync message from a peer
     #[instrument(skip(self, message))]
-    pub async fn receive_sync_message(&self, message: SyncMessage) -> CrdtResult<Option<SyncMessage>> {
+    pub async fn receive_sync_message(
+        &self,
+        message: SyncMessage,
+    ) -> CrdtResult<Option<SyncMessage>> {
         let mut docs = self.documents.write().await;
         let doc = docs
             .get_mut(&message.document_id)
@@ -798,7 +940,10 @@ impl CrdtBlackboard {
         Err(CrdtError::FeatureNotEnabled)
     }
 
-    pub async fn receive_sync_message(&self, _message: SyncMessage) -> CrdtResult<Option<SyncMessage>> {
+    pub async fn receive_sync_message(
+        &self,
+        _message: SyncMessage,
+    ) -> CrdtResult<Option<SyncMessage>> {
         Err(CrdtError::FeatureNotEnabled)
     }
 
@@ -864,11 +1009,63 @@ mod tests {
             .unwrap();
 
         // Read values
-        let status = blackboard.get(&doc_id, &["task-1", "status"]).await.unwrap();
+        let status = blackboard
+            .get(&doc_id, &["task-1", "status"])
+            .await
+            .unwrap();
         assert!(matches!(status, Some(CrdtValue::String(s)) if s == "in-progress"));
 
-        let priority = blackboard.get(&doc_id, &["task-1", "priority"]).await.unwrap();
+        let priority = blackboard
+            .get(&doc_id, &["task-1", "priority"])
+            .await
+            .unwrap();
         assert!(matches!(priority, Some(CrdtValue::Int(1))));
+    }
+
+    #[tokio::test]
+    async fn test_nested_map_and_list_roundtrip() {
+        let blackboard = CrdtBlackboard::new(CrdtConfig::default());
+        let doc_id = DocumentId::new("nested");
+
+        blackboard.get_or_create_document(&doc_id).await.unwrap();
+
+        // Set a nested Map value directly (not via intermediate path
+        // segments) to exercise put_object/recursive writes.
+        let mut inner = HashMap::new();
+        inner.insert("name".to_string(), CrdtValue::String("alice".into()));
+        inner.insert("age".to_string(), CrdtValue::Int(30));
+        inner.insert(
+            "tags".to_string(),
+            CrdtValue::List(vec![
+                CrdtValue::String("admin".into()),
+                CrdtValue::String("dev".into()),
+            ]),
+        );
+
+        blackboard
+            .set(&doc_id, &["profile"], CrdtValue::Map(inner))
+            .await
+            .unwrap();
+
+        // Read the whole nested object back — this must be a real,
+        // fully-populated Map, not the empty placeholder.
+        let value = blackboard.get(&doc_id, &["profile"]).await.unwrap();
+        match value {
+            Some(CrdtValue::Map(map)) => {
+                assert_eq!(map.len(), 3);
+                assert!(matches!(map.get("name"), Some(CrdtValue::String(s)) if s == "alice"));
+                assert!(matches!(map.get("age"), Some(CrdtValue::Int(30))));
+                match map.get("tags") {
+                    Some(CrdtValue::List(items)) => {
+                        assert_eq!(items.len(), 2);
+                        assert!(matches!(&items[0], CrdtValue::String(s) if s == "admin"));
+                        assert!(matches!(&items[1], CrdtValue::String(s) if s == "dev"));
+                    }
+                    other => panic!("expected nested list for 'tags', got {other:?}"),
+                }
+            }
+            other => panic!("expected nested map for 'profile', got {other:?}"),
+        }
     }
 
     #[tokio::test]

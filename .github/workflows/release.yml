@@ -31,9 +31,9 @@ jobs:
       - name: Build release
         run: |
           if [ "${{ matrix.target }}" = "x86_64-unknown-linux-gnu" ]; then
-            cargo build --release --bin syn-proxy --bin syn
+            cargo build --release --bin syn-proxy --bin syn --bin syn-admin
           else
-            cargo build --release --bin syn-proxy --bin syn --target ${{ matrix.target }}
+            cargo build --release --bin syn-proxy --bin syn --bin syn-admin --target ${{ matrix.target }}
           fi
 
       - name: Upload artifacts
@@ -43,4 +43,5 @@ jobs:
           path: |
             target/${{ matrix.target }}/release/syn-proxy*
             target/${{ matrix.target }}/release/syn*
+            target/${{ matrix.target }}/release/syn-admin*
 

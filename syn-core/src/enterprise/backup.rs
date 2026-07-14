@@ -32,12 +32,18 @@
 //! └─────────────────────────────────────────────────────────────────┘
 //! ```
 
+use chrono::{DateTime, Datelike, TimeZone, Utc};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Once;
 use std::time::{Duration, SystemTime};
-use tokio::sync::RwLock;
-use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use tokio::sync::RwLock;
+
+/// Ensures the "cron expressions aren't parsed" warning is only emitted once
+/// per process.
+static CRON_FALLBACK_WARNING: Once = Once::new();
 
 /// Backup type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -117,17 +123,118 @@ impl Default for BackupSchedule {
 
 impl BackupSchedule {
     /// Calculate next run time from now.
+    ///
+    /// `Daily`, `Weekly`, and `Monthly` compute the actual next occurrence of the
+    /// configured hour (and day, where applicable) in UTC, rather than a flat
+    /// 24h/7d/30d offset. `Cron` expressions are not parsed; it falls back to an
+    /// hourly cadence and logs a one-time warning so the limitation isn't silent.
     pub fn next_run(&self, from: SystemTime) -> SystemTime {
         match self {
             BackupSchedule::Once => from,
             BackupSchedule::Minutes(n) => from + Duration::from_secs(*n as u64 * 60),
             BackupSchedule::Hourly(n) => from + Duration::from_secs(*n as u64 * 3600),
-            BackupSchedule::Daily { hour: _ } => from + Duration::from_secs(86400),
-            BackupSchedule::Weekly { .. } => from + Duration::from_secs(86400 * 7),
-            BackupSchedule::Monthly { .. } => from + Duration::from_secs(86400 * 30),
-            BackupSchedule::Cron(_) => from + Duration::from_secs(3600), // Simplified
+            BackupSchedule::Daily { hour } => next_daily_occurrence(from, *hour),
+            BackupSchedule::Weekly { day, hour } => next_weekly_occurrence(from, *day, *hour),
+            BackupSchedule::Monthly { day, hour } => next_monthly_occurrence(from, *day, *hour),
+            BackupSchedule::Cron(_) => {
+                CRON_FALLBACK_WARNING.call_once(|| {
+                    tracing::warn!(
+                        "BackupSchedule::Cron does not parse cron expressions; falling back \
+                         to an hourly schedule instead of honoring the cron string."
+                    );
+                });
+                from + Duration::from_secs(3600) // Simplified fallback
+            }
         }
     }
+}
+
+/// Compute the next UTC instant at the given `hour` (0-23) strictly after `from`.
+fn next_daily_occurrence(from: SystemTime, hour: u32) -> SystemTime {
+    let hour = hour.min(23);
+    let dt: DateTime<Utc> = from.into();
+
+    let mut candidate = dt
+        .date_naive()
+        .and_hms_opt(hour, 0, 0)
+        .expect("hour is clamped to 0-23");
+
+    if candidate <= dt.naive_utc() {
+        candidate += chrono::Duration::days(1);
+    }
+
+    Utc.from_utc_datetime(&candidate).into()
+}
+
+/// Compute the next UTC instant on the given day-of-week (0=Sunday..6=Saturday)
+/// at the given `hour`, strictly after `from`.
+fn next_weekly_occurrence(from: SystemTime, day: u32, hour: u32) -> SystemTime {
+    let hour = hour.min(23);
+    let day = day.min(6);
+    let dt: DateTime<Utc> = from.into();
+
+    let current_dow = dt.weekday().num_days_from_sunday();
+    let mut days_ahead = (day + 7 - current_dow) % 7;
+
+    let mut candidate_date = dt.date_naive() + chrono::Duration::days(i64::from(days_ahead));
+    let mut candidate = candidate_date
+        .and_hms_opt(hour, 0, 0)
+        .expect("hour is clamped to 0-23");
+
+    if days_ahead == 0 && candidate <= dt.naive_utc() {
+        days_ahead = 7;
+        candidate_date = dt.date_naive() + chrono::Duration::days(i64::from(days_ahead));
+        candidate = candidate_date
+            .and_hms_opt(hour, 0, 0)
+            .expect("hour is clamped to 0-23");
+    }
+
+    Utc.from_utc_datetime(&candidate).into()
+}
+
+/// Compute the next UTC instant on the given day-of-month (1-31, clamped to the
+/// last day of shorter months) at the given `hour`, strictly after `from`.
+fn next_monthly_occurrence(from: SystemTime, day: u32, hour: u32) -> SystemTime {
+    let hour = hour.min(23);
+    let day = day.clamp(1, 31);
+    let dt: DateTime<Utc> = from.into();
+    let cur = dt.date_naive();
+
+    let build = |year: i32, month: u32| -> chrono::NaiveDateTime {
+        let last_day = last_day_of_month(year, month);
+        let d = day.min(last_day);
+        chrono::NaiveDate::from_ymd_opt(year, month, d)
+            .expect("valid year/month/day")
+            .and_hms_opt(hour, 0, 0)
+            .expect("hour is clamped to 0-23")
+    };
+
+    let mut candidate = build(cur.year(), cur.month());
+
+    if candidate <= dt.naive_utc() {
+        let (next_year, next_month) = if cur.month() == 12 {
+            (cur.year() + 1, 1)
+        } else {
+            (cur.year(), cur.month() + 1)
+        };
+        candidate = build(next_year, next_month);
+    }
+
+    Utc.from_utc_datetime(&candidate).into()
+}
+
+/// Last valid day-of-month (28-31) for the given year/month.
+fn last_day_of_month(year: i32, month: u32) -> u32 {
+    let (next_year, next_month) = if month == 12 {
+        (year + 1, 1)
+    } else {
+        (year, month + 1)
+    };
+    chrono::NaiveDate::from_ymd_opt(next_year, next_month, 1)
+        .expect("valid year/month")
+        .pred_opt()
+        .expect("day before the 1st is always valid")
+        .day()
 }
 
 /// Retention policy for backups.
@@ -290,17 +397,17 @@ impl RecoveryPoint {
             error: None,
         }
     }
-    
+
     /// Check if this is a full backup.
     pub fn is_full(&self) -> bool {
         matches!(self.backup_type, BackupType::Full)
     }
-    
+
     /// Check if backup is complete.
     pub fn is_complete(&self) -> bool {
         matches!(self.status, BackupStatus::Completed)
     }
-    
+
     /// Get backup age.
     pub fn age(&self) -> Duration {
         SystemTime::now()
@@ -315,35 +422,35 @@ pub enum BackupError {
     /// Backup not found
     #[error("Backup not found: {0}")]
     NotFound(String),
-    
+
     /// Backup in progress
     #[error("Backup already in progress")]
     InProgress,
-    
+
     /// Storage error
     #[error("Storage error: {0}")]
     StorageError(String),
-    
+
     /// Checksum mismatch
     #[error("Checksum mismatch for backup {0}")]
     ChecksumMismatch(String),
-    
+
     /// Recovery failed
     #[error("Recovery failed: {0}")]
     RecoveryFailed(String),
-    
+
     /// Invalid backup chain
     #[error("Invalid backup chain: {0}")]
     InvalidChain(String),
-    
+
     /// Retention policy violation
     #[error("Cannot delete backup: retention policy requires keeping it")]
     RetentionViolation,
-    
+
     /// Encryption error
     #[error("Encryption error: {0}")]
     EncryptionError(String),
-    
+
     /// Configuration error
     #[error("Configuration error: {0}")]
     ConfigError(String),
@@ -383,13 +490,13 @@ impl BackupProgress {
         }
         None
     }
-    
+
     /// Calculate throughput in bytes per second.
     pub fn throughput(&self) -> f64 {
         let elapsed = SystemTime::now()
             .duration_since(self.started_at)
             .unwrap_or(Duration::from_secs(1));
-        
+
         self.bytes_processed as f64 / elapsed.as_secs_f64()
     }
 }
@@ -437,7 +544,7 @@ impl BackupManager {
             next_scheduled: RwLock::new(None),
         }
     }
-    
+
     /// Start a new backup.
     pub async fn start_backup(
         &self,
@@ -451,13 +558,9 @@ impl BackupManager {
                 return Err(BackupError::InProgress);
             }
         }
-        
-        let backup_id = format!(
-            "backup-{}-{}",
-            chrono_like_timestamp(),
-            rand_id()
-        );
-        
+
+        let backup_id = format!("backup-{}-{}", chrono_like_timestamp(), rand_id());
+
         let mut recovery_point = RecoveryPoint::new(
             backup_id.clone(),
             backup_type,
@@ -465,11 +568,15 @@ impl BackupManager {
         );
         recovery_point.tenant_id = tenant_id;
         recovery_point.status = BackupStatus::InProgress;
-        
+
         // For incremental, find parent
-        if matches!(backup_type, BackupType::Incremental | BackupType::Differential) {
+        if matches!(
+            backup_type,
+            BackupType::Incremental | BackupType::Differential
+        ) {
             let points = self.recovery_points.read().await;
-            let parent = points.iter()
+            let parent = points
+                .iter()
                 .filter(|p| p.is_complete())
                 .filter(|p| {
                     if backup_type == BackupType::Incremental {
@@ -479,7 +586,7 @@ impl BackupManager {
                     }
                 })
                 .last();
-            
+
             if let Some(p) = parent {
                 recovery_point.parent_id = Some(p.id.clone());
             } else if backup_type == BackupType::Incremental {
@@ -487,7 +594,7 @@ impl BackupManager {
                 recovery_point.backup_type = BackupType::Full;
             }
         }
-        
+
         // Set progress
         {
             let mut current = self.current_backup.write().await;
@@ -502,16 +609,16 @@ impl BackupManager {
                 estimated_completion: None,
             });
         }
-        
+
         // Add to recovery points
         {
             let mut points = self.recovery_points.write().await;
             points.push(recovery_point.clone());
         }
-        
+
         Ok(recovery_point)
     }
-    
+
     /// Update backup progress.
     pub async fn update_progress(
         &self,
@@ -521,7 +628,7 @@ impl BackupManager {
         phase: &str,
     ) -> BackupResult<()> {
         let mut current = self.current_backup.write().await;
-        
+
         if let Some(ref mut progress) = *current {
             if progress.backup_id == backup_id {
                 progress.bytes_processed = bytes;
@@ -529,10 +636,10 @@ impl BackupManager {
                 progress.phase = phase.to_string();
             }
         }
-        
+
         Ok(())
     }
-    
+
     /// Complete a backup.
     pub async fn complete_backup(
         &self,
@@ -542,26 +649,26 @@ impl BackupManager {
         checksum: String,
     ) -> BackupResult<RecoveryPoint> {
         let mut points = self.recovery_points.write().await;
-        
+
         let point = points
             .iter_mut()
             .find(|p| p.id == backup_id)
             .ok_or_else(|| BackupError::NotFound(backup_id.to_string()))?;
-        
+
         point.status = BackupStatus::Completed;
         point.completed_at = Some(SystemTime::now());
         point.size_bytes = size_bytes;
         point.object_count = object_count;
         point.checksum = checksum;
-        
+
         let result = point.clone();
-        
+
         // Clear current backup
         {
             let mut current = self.current_backup.write().await;
             *current = None;
         }
-        
+
         // Update stats
         {
             let mut stats = self.stats.write().await;
@@ -571,34 +678,34 @@ impl BackupManager {
             stats.last_backup_at = Some(SystemTime::now());
             stats.last_successful_at = Some(SystemTime::now());
         }
-        
+
         // Schedule next backup
         {
             let mut next = self.next_scheduled.write().await;
             *next = Some(self.config.schedule.next_run(SystemTime::now()));
         }
-        
+
         Ok(result)
     }
-    
+
     /// Fail a backup.
     pub async fn fail_backup(&self, backup_id: &str, error: String) -> BackupResult<()> {
         let mut points = self.recovery_points.write().await;
-        
+
         let point = points
             .iter_mut()
             .find(|p| p.id == backup_id)
             .ok_or_else(|| BackupError::NotFound(backup_id.to_string()))?;
-        
+
         point.status = BackupStatus::Failed;
         point.error = Some(error);
-        
+
         // Clear current backup
         {
             let mut current = self.current_backup.write().await;
             *current = None;
         }
-        
+
         // Update stats
         {
             let mut stats = self.stats.write().await;
@@ -606,16 +713,16 @@ impl BackupManager {
             stats.failed_backups += 1;
             stats.last_backup_at = Some(SystemTime::now());
         }
-        
+
         Ok(())
     }
-    
+
     /// List recovery points.
     pub async fn list_recovery_points(&self) -> Vec<RecoveryPoint> {
         let points = self.recovery_points.read().await;
         points.clone()
     }
-    
+
     /// Get a specific recovery point.
     pub async fn get_recovery_point(&self, id: &str) -> BackupResult<RecoveryPoint> {
         let points = self.recovery_points.read().await;
@@ -625,7 +732,7 @@ impl BackupManager {
             .cloned()
             .ok_or_else(|| BackupError::NotFound(id.to_string()))
     }
-    
+
     /// Find the latest recovery point.
     pub async fn latest_recovery_point(&self) -> Option<RecoveryPoint> {
         let points = self.recovery_points.read().await;
@@ -635,85 +742,105 @@ impl BackupManager {
             .max_by_key(|p| p.created_at)
             .cloned()
     }
-    
+
     /// Find recovery points for point-in-time recovery.
-    pub async fn find_recovery_chain(&self, target_time: SystemTime) -> BackupResult<Vec<RecoveryPoint>> {
+    pub async fn find_recovery_chain(
+        &self,
+        target_time: SystemTime,
+    ) -> BackupResult<Vec<RecoveryPoint>> {
         let points = self.recovery_points.read().await;
-        
+
         // Find the most recent full backup before target time
         let base = points
             .iter()
             .filter(|p| p.is_complete() && p.is_full())
             .filter(|p| p.created_at <= target_time)
             .max_by_key(|p| p.created_at);
-        
+
         let base = match base {
             Some(b) => b,
-            None => return Err(BackupError::InvalidChain(
-                "No full backup found before target time".to_string()
-            )),
+            None => {
+                return Err(BackupError::InvalidChain(
+                    "No full backup found before target time".to_string(),
+                ))
+            }
         };
-        
+
         // Find all incremental backups between base and target
         let mut chain = vec![base.clone()];
-        
+
         let incrementals: Vec<_> = points
             .iter()
             .filter(|p| p.is_complete())
             .filter(|p| p.created_at > base.created_at && p.created_at <= target_time)
             .filter(|p| matches!(p.backup_type, BackupType::Incremental))
             .collect();
-        
+
         chain.extend(incrementals.into_iter().cloned());
         chain.sort_by_key(|p| p.created_at);
-        
+
         Ok(chain)
     }
-    
+
     /// Delete a recovery point.
     pub async fn delete_recovery_point(&self, id: &str) -> BackupResult<()> {
         let mut points = self.recovery_points.write().await;
-        
+
         // Check retention policy
         let point = points
             .iter()
             .find(|p| p.id == id)
             .ok_or_else(|| BackupError::NotFound(id.to_string()))?;
-        
+
         // Check if this is a required full backup
         if point.is_full() {
-            let full_count = points.iter()
+            let full_count = points
+                .iter()
                 .filter(|p| p.is_full() && p.is_complete())
                 .count();
-            
+
             if full_count <= self.config.retention.min_full_backups as usize {
                 return Err(BackupError::RetentionViolation);
             }
         }
-        
+
         // Check if any incremental depends on this
         let has_dependents = points.iter().any(|p| p.parent_id.as_deref() == Some(id));
         if has_dependents {
             return Err(BackupError::InvalidChain(
-                "Cannot delete backup with dependent incrementals".to_string()
+                "Cannot delete backup with dependent incrementals".to_string(),
             ));
         }
-        
+
         points.retain(|p| p.id != id);
-        
+
         Ok(())
     }
-    
+
     /// Apply retention policy.
     pub async fn apply_retention(&self) -> BackupResult<Vec<String>> {
         let mut points = self.recovery_points.write().await;
         let now = SystemTime::now();
-        let retention_threshold = now - Duration::from_secs(
-            self.config.retention.retain_days as u64 * 86400
-        );
-        
+        let retention_threshold =
+            now - Duration::from_secs(self.config.retention.retain_days as u64 * 86400);
+
         let mut deleted = Vec::new();
-        
+
+        // Budget of full backups we're allowed to delete in this pass. This is
+        // computed once, up front, from the *current* total - the previous
+        // implementation recomputed `full_count` from the un-mutated `points`
+        // vector inside the filter closure for every candidate, so every
+        // eligible full backup independently saw the same "count > min" result
+        // and could all be queued for deletion in a single call, violating
+        // `min_full_backups`. Decrementing a shared budget as we walk the
+        // (oldest-first) list ensures we stop once the minimum is reached.
+        let total_full_complete = points
+            .iter()
+            .filter(|p| p.is_full() && p.is_complete())
+            .count();
+        let mut full_backups_deletable =
+            total_full_complete.saturating_sub(self.config.retention.min_full_backups as usize);
+
         // Find backups to delete
         let to_delete: Vec<_> = points
             .iter()
@@ -722,41 +849,45 @@ impl BackupManager {
             .filter(|p| {
                 // Keep minimum full backups
                 if p.is_full() {
-                    let full_count = points.iter()
-                        .filter(|pp| pp.is_full() && pp.is_complete())
-                        .count();
-                    full_count > self.config.retention.min_full_backups as usize
+                    if full_backups_deletable > 0 {
+                        full_backups_deletable -= 1;
+                        true
+                    } else {
+                        false
+                    }
                 } else {
                     true
                 }
             })
             .filter(|p| {
                 // Keep if has dependents
-                !points.iter().any(|pp| pp.parent_id.as_deref() == Some(&p.id))
+                !points
+                    .iter()
+                    .any(|pp| pp.parent_id.as_deref() == Some(&p.id))
             })
             .map(|p| p.id.clone())
             .collect();
-        
+
         for id in to_delete {
             points.retain(|p| p.id != id);
             deleted.push(id);
         }
-        
+
         Ok(deleted)
     }
-    
+
     /// Get current backup progress.
     pub async fn current_progress(&self) -> Option<BackupProgress> {
         let current = self.current_backup.read().await;
         current.clone()
     }
-    
+
     /// Get backup statistics.
     pub async fn stats(&self) -> BackupStats {
         let stats = self.stats.read().await;
         stats.clone()
     }
-    
+
     /// Get next scheduled backup time.
     pub async fn next_scheduled_backup(&self) -> Option<SystemTime> {
         let next = self.next_scheduled.read().await;
@@ -774,60 +905,62 @@ fn chrono_like_timestamp() -> String {
 }
 
 fn rand_id() -> String {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    
-    let mut hasher = DefaultHasher::new();
-    SystemTime::now().hash(&mut hasher);
-    format!("{:08x}", hasher.finish() as u32)
+    // 8 lowercase hex chars, matching the previous format, but backed by a
+    // real UUIDv4 instead of a hash of the current timestamp (which could
+    // collide under concurrent calls within the same clock tick).
+    let id = uuid::Uuid::new_v4().simple().to_string();
+    id[..8].to_string()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[tokio::test]
     async fn test_backup_manager_creation() {
         let manager = BackupManager::new(BackupConfig::default());
         let points = manager.list_recovery_points().await;
         assert!(points.is_empty());
     }
-    
+
     #[tokio::test]
     async fn test_start_full_backup() {
         let manager = BackupManager::new(BackupConfig::default());
-        
+
         let backup = manager.start_backup(BackupType::Full, None).await.unwrap();
-        
+
         assert!(backup.is_full());
         assert_eq!(backup.status, BackupStatus::InProgress);
     }
-    
+
     #[tokio::test]
     async fn test_complete_backup() {
         let manager = BackupManager::new(BackupConfig::default());
-        
+
         let backup = manager.start_backup(BackupType::Full, None).await.unwrap();
-        
+
         let completed = manager
             .complete_backup(&backup.id, 1024 * 1024, 100, "checksum123".to_string())
             .await
             .unwrap();
-        
+
         assert!(completed.is_complete());
         assert_eq!(completed.size_bytes, 1024 * 1024);
         assert_eq!(completed.object_count, 100);
     }
-    
+
     #[tokio::test]
     async fn test_incremental_needs_parent() {
         let manager = BackupManager::new(BackupConfig::default());
-        
+
         // First incremental without full should become full
-        let backup = manager.start_backup(BackupType::Incremental, None).await.unwrap();
+        let backup = manager
+            .start_backup(BackupType::Incremental, None)
+            .await
+            .unwrap();
         assert!(backup.is_full()); // Upgraded to full
     }
-    
+
     #[tokio::test]
     async fn test_retention_policy() {
         let config = BackupConfig {
@@ -838,9 +971,9 @@ mod tests {
             },
             ..Default::default()
         };
-        
+
         let manager = BackupManager::new(config);
-        
+
         // Create and complete two backups
         for _ in 0..2 {
             let backup = manager.start_backup(BackupType::Full, None).await.unwrap();
@@ -849,21 +982,74 @@ mod tests {
                 .await
                 .unwrap();
         }
-        
-        // Apply retention - should keep min_full_backups (1)
+
+        // Apply retention - should keep min_full_backups (1) and delete the rest
         let deleted = manager.apply_retention().await.unwrap();
-        
+        assert_eq!(deleted.len(), 1);
+
         let remaining = manager.list_recovery_points().await;
-        assert!(remaining.len() >= 1);
+        assert_eq!(remaining.len(), 1);
     }
-    
+
     #[test]
     fn test_schedule_next_run() {
+        use chrono::{DateTime, Timelike, Utc};
+
         let schedule = BackupSchedule::Daily { hour: 2 };
         let now = SystemTime::now();
         let next = schedule.next_run(now);
-        
+
+        // Must be strictly in the future, at most 24h out, and aligned to 02:00 UTC.
+        assert!(next > now);
         let diff = next.duration_since(now).unwrap();
-        assert_eq!(diff.as_secs(), 86400);
+        assert!(diff.as_secs() <= 86400);
+
+        let next_dt: DateTime<Utc> = next.into();
+        assert_eq!(next_dt.hour(), 2);
+        assert_eq!(next_dt.minute(), 0);
+        assert_eq!(next_dt.second(), 0);
+    }
+
+    #[test]
+    fn test_schedule_next_run_weekly_aligns_to_day_and_hour() {
+        use chrono::{DateTime, Datelike, Timelike, Utc};
+
+        let schedule = BackupSchedule::Weekly { day: 0, hour: 3 }; // Sunday 3am
+        let now = SystemTime::now();
+        let next = schedule.next_run(now);
+
+        assert!(next > now);
+        let next_dt: DateTime<Utc> = next.into();
+        assert_eq!(next_dt.weekday().num_days_from_sunday(), 0);
+        assert_eq!(next_dt.hour(), 3);
+
+        let diff = next.duration_since(now).unwrap();
+        assert!(diff.as_secs() <= 86400 * 7);
+    }
+
+    #[test]
+    fn test_schedule_next_run_monthly_aligns_to_day_and_hour() {
+        use chrono::{DateTime, Datelike, Timelike, Utc};
+
+        let schedule = BackupSchedule::Monthly { day: 1, hour: 4 };
+        let now = SystemTime::now();
+        let next = schedule.next_run(now);
+
+        assert!(next > now);
+        let next_dt: DateTime<Utc> = next.into();
+        assert_eq!(next_dt.day(), 1);
+        assert_eq!(next_dt.hour(), 4);
+
+        let diff = next.duration_since(now).unwrap();
+        assert!(diff.as_secs() <= 86400 * 31);
+    }
+
+    #[test]
+    fn test_rand_id_is_unique() {
+        let a = rand_id();
+        let b = rand_id();
+        assert_eq!(a.len(), 8);
+        assert_eq!(b.len(), 8);
+        assert_ne!(a, b);
     }
 }

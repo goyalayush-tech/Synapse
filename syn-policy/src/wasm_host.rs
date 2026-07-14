@@ -72,7 +72,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
 use tokio::sync::RwLock;
-use tracing::{debug, info, instrument, warn, error};
+use tracing::{debug, error, info, instrument, warn};
 
 // WHY aes-gcm: Authenticated encryption prevents both tampering and decryption
 // without the correct key derived from eBPF state
@@ -83,7 +83,7 @@ use aes_gcm::{
 
 // WHY sha2: Deterministic key derivation from TRUSTED_PIDS ensures same key
 // is generated on hosts with identical verified process sets
-use sha2::{Sha256, Digest};
+use sha2::{Digest, Sha256};
 
 /// Errors from the WASM host
 #[derive(Debug, Error)]
@@ -140,7 +140,7 @@ impl Default for WasmHostConfig {
         Self {
             max_fuel: 1_000_000,
             timeout: Duration::from_millis(100),
-            enable_wasi: false, // Sandboxed by default
+            enable_wasi: false,        // Sandboxed by default
             require_encryption: false, // Enable in production
             wit_path: "./wit".to_string(),
         }
@@ -338,8 +338,16 @@ impl SynapseHostState {
             }
         }
 
-        // Default: allow with audit for development
-        AuthResult::AllowWithAudit
+        // Fail closed: a destination that does not match any entry in the
+        // allowlist is denied by default. Previously this fell through to
+        // `AllowWithAudit`, which meant unmatched (i.e. unknown/untrusted)
+        // destinations were allowed by default — a dangerous default for a
+        // governance policy engine.
+        debug!(
+            "Denying connection to unmatched destination: {}:{}",
+            request.dest_ip, request.dest_port
+        );
+        AuthResult::Deny
     }
 
     /// Get allowed destinations
@@ -380,8 +388,12 @@ impl SynapseHostState {
         // In production:
         // self.identity_provider.verify_pid(pid).await?
 
-        // Simulated: trust current process and its children
-        pid == std::process::id() || pid < 100 // Simulate kernel processes
+        // Only trust the current process itself. The previous heuristic of
+        // also trusting `pid < 100` was actively wrong: PIDs are recycled by
+        // the OS and a low PID number carries no inherent trust guarantee.
+        // There is no real eBPF-backed identity check wired up in this
+        // build, so this is intentionally conservative.
+        pid == std::process::id()
     }
 
     /// Get process identity
@@ -417,7 +429,13 @@ impl SynapseHostState {
         // 3. Check against allowlist
         // 4. If valid, add to TRUSTED_PIDS map
 
-        true // Simulated success
+        warn!(
+            "request_attestation({}) is failing closed: no real attestation mechanism \
+             (binary hashing, eBPF TRUSTED_PIDS update) is wired up in this build, so \
+             attestation can never actually succeed.",
+            pid
+        );
+        false // Fail closed: no real attestation is implemented
     }
 
     // =========================================================================
@@ -509,7 +527,35 @@ impl WasmHost {
             wasm_bytes
         };
 
-        // In production with wasmtime:
+        // Validate the module before trusting it. At minimum, check the
+        // WASM magic bytes (`\0asm`); this build always has wasmtime
+        // available (this whole module is gated on the `wasm-full` feature,
+        // which depends on wasmtime), so prefer real structural validation
+        // via `wasmtime::Module::validate` over the magic-byte check alone.
+        const WASM_MAGIC: [u8; 4] = [0x00, 0x61, 0x73, 0x6D]; // "\0asm"
+        if wasm_bytes.len() < 4 || wasm_bytes[0..4] != WASM_MAGIC {
+            return Err(WasmHostError::LoadFailed(format!(
+                "Invalid WASM module at {}: missing \\0asm magic bytes",
+                path.display()
+            )));
+        }
+
+        let engine = wasmtime::Engine::default();
+        // Note: this validates core WASM modules. WASM *components* (the
+        // WIT/Component-Model binaries `ComponentModelHost` actually loads
+        // via `Component::new`) are rejected here with "component passed to
+        // module validation" — that's an intentionally strict floor, not a
+        // false positive: `WasmHost` never executes anything (see
+        // `evaluate()`), so this validation only guards against loading
+        // garbage/corrupted bytes.
+        wasmtime::Module::validate(&engine, &wasm_bytes).map_err(|e| {
+            WasmHostError::LoadFailed(format!(
+                "WASM module at {} failed structural validation: {e}",
+                path.display()
+            ))
+        })?;
+
+        // In production with wasmtime component model:
         // let component = Component::new(&self.engine, &wasm_bytes)?;
         // let instance = self.linker.instantiate_async(&mut store, &component).await?;
         //
@@ -521,16 +567,24 @@ impl WasmHost {
         // let get_metadata = instance.get_typed_func::<(), PolicyMetadata>(&mut store, "get-metadata")?;
         // self.policy_metadata = Some(get_metadata.call_async(&mut store, ()).await?);
 
-        // Simulated load
+        // NOTE: WasmHost validates the module but does NOT instantiate or
+        // execute it — see `evaluate()`, which always fails closed. Real
+        // execution requires `ComponentModelHost::load_component`. Metadata
+        // is derived from the filename rather than fabricated, since we
+        // have no real `get-metadata` export to call.
         self.loaded = true;
+        let name = path
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
         self.policy_metadata = Some(PolicyMetadata {
-            name: "test-policy".to_string(),
-            version: "1.0.0".to_string(),
-            description: "Test policy module".to_string(),
-            author: "Synapse".to_string(),
+            name,
+            version: String::new(),
+            description: String::new(),
+            author: String::new(),
         });
 
-        info!("Policy loaded successfully");
+        info!("Policy module validated and marked as loaded (not executed — use ComponentModelHost for real evaluation)");
         Ok(())
     }
 
@@ -538,7 +592,9 @@ impl WasmHost {
     #[instrument(skip(self, event), fields(event_type = %event.event_type))]
     pub async fn evaluate(&self, event: PolicyEvent) -> WasmHostResult<PolicyVerdict> {
         if !self.loaded {
-            return Err(WasmHostError::EvaluationFailed("No policy loaded".to_string()));
+            return Err(WasmHostError::EvaluationFailed(
+                "No policy loaded".to_string(),
+            ));
         }
 
         debug!(
@@ -558,12 +614,26 @@ impl WasmHost {
         //     evaluate.call_async(&mut store, event)
         // ).await??;
 
-        // Simulated evaluation
+        // `WasmHost` does NOT actually execute WASM policies — it never
+        // instantiates a wasmtime module or calls into guest code. Returning
+        // an unconditional `allow: true` here regardless of the loaded
+        // policy would silently bypass governance. Fail closed instead: any
+        // caller relying on this type for real enforcement needs to use
+        // `ComponentModelHost`, which does real evaluation via wasmtime.
+        warn!(
+            "WasmHost::evaluate does not execute WASM policies in this build — \
+             denying by default. Use ComponentModelHost for real policy evaluation."
+        );
         let verdict = PolicyVerdict {
-            allow: true,
-            reason: format!("Simulated allow for {}", event.event_type),
+            allow: false,
+            reason: format!(
+                "WasmHost does not execute WASM policies (event type: {}); \
+                 real evaluation requires ComponentModelHost, which actually runs the \
+                 loaded module via wasmtime. Failing closed.",
+                event.event_type
+            ),
             transform: None,
-            tags: vec!["evaluated".to_string()],
+            tags: vec!["fail-closed".to_string(), "not-evaluated".to_string()],
         };
 
         // Update stats
@@ -714,8 +784,8 @@ impl WasmHost {
         //
         // For now, return simulated trusted processes
         vec![
-            1,                      // init/systemd
-            std::process::id(),     // current process
+            1,                  // init/systemd
+            std::process::id(), // current process
         ]
     }
 
@@ -761,12 +831,12 @@ impl WasmHost {
 // =============================================================================
 
 /// Module for wasmtime component model bindgen integration
-/// 
+///
 /// This module uses the `bindgen!` macro to generate Rust types and traits
 /// from the WIT definitions in `wit/governance.wit`.
 pub mod bindgen {
     #![allow(unused_imports, dead_code)]
-    
+
     // Generate bindings from WIT file
     // The bindgen! macro creates:
     // - Rust types matching WIT record definitions
@@ -777,7 +847,7 @@ pub mod bindgen {
     // WHY async: Host functions may need to access async storage (LanceDB)
     wasmtime::component::bindgen!({
         world: "policy-engine",
-        path: "wit/governance.wit",
+        path: "../wit/governance.wit",
         async: true,
         with: {
             // Map WIT types to our Rust types
@@ -787,10 +857,10 @@ pub mod bindgen {
 }
 
 // Re-export generated types for convenience
-pub use bindgen::synapse::governance::context_access as wit_context;
-pub use bindgen::synapse::governance::network_control as wit_network;
-pub use bindgen::synapse::governance::identity_access as wit_identity;
 pub use bindgen::exports::synapse::governance::policy_engine as wit_policy;
+pub use bindgen::synapse::governance::context_access as wit_context;
+pub use bindgen::synapse::governance::identity_access as wit_identity;
+pub use bindgen::synapse::governance::network_control as wit_network;
 
 /// Implement the context-access interface for our host state
 impl wit_context::Host for SynapseHostState {
@@ -811,13 +881,15 @@ impl wit_context::Host for SynapseHostState {
 
     /// Get a specific event by ID
     async fn get_event(&mut self, id: u64) -> Option<wit_context::SearchResult> {
-        SynapseHostState::get_event(self, id).await.map(|r| wit_context::SearchResult {
-            id: r.id,
-            source: r.source,
-            action: r.action,
-            reason: r.reason,
-            score: r.score,
-        })
+        SynapseHostState::get_event(self, id)
+            .await
+            .map(|r| wit_context::SearchResult {
+                id: r.id,
+                source: r.source,
+                action: r.action,
+                reason: r.reason,
+                score: r.score,
+            })
     }
 
     /// Get recent events
@@ -836,7 +908,11 @@ impl wit_context::Host for SynapseHostState {
     }
 
     /// Get events by action type
-    async fn get_by_action(&mut self, action: String, limit: u32) -> Vec<wit_context::SearchResult> {
+    async fn get_by_action(
+        &mut self,
+        action: String,
+        limit: u32,
+    ) -> Vec<wit_context::SearchResult> {
         SynapseHostState::get_by_action(self, &action, limit)
             .await
             .into_iter()
@@ -854,7 +930,10 @@ impl wit_context::Host for SynapseHostState {
 /// Implement the network-control interface for our host state
 impl wit_network::Host for SynapseHostState {
     /// Authorize a network connection
-    async fn authorize_connection(&mut self, request: wit_network::ConnectionRequest) -> wit_network::AuthResult {
+    async fn authorize_connection(
+        &mut self,
+        request: wit_network::ConnectionRequest,
+    ) -> wit_network::AuthResult {
         let req = ConnectionRequest {
             pid: request.pid,
             dest_ip: request.dest_ip,
@@ -888,13 +967,15 @@ impl wit_identity::Host for SynapseHostState {
 
     /// Get full identity for a PID
     async fn get_identity(&mut self, pid: u32) -> Option<wit_identity::ProcessIdentity> {
-        SynapseHostState::get_identity(self, pid).await.map(|i| wit_identity::ProcessIdentity {
-            pid: i.pid,
-            ppid: i.ppid,
-            trusted: i.trusted,
-            binary_hash: i.binary_hash,
-            cgroup_path: i.cgroup_path,
-        })
+        SynapseHostState::get_identity(self, pid)
+            .await
+            .map(|i| wit_identity::ProcessIdentity {
+                pid: i.pid,
+                ppid: i.ppid,
+                trusted: i.trusted,
+                binary_hash: i.binary_hash,
+                cgroup_path: i.cgroup_path,
+            })
     }
 
     /// List all trusted PIDs
@@ -910,7 +991,11 @@ impl wit_identity::Host for SynapseHostState {
 
 /// Implement the logging interface for our host state
 impl bindgen::synapse::governance::logging::Host for SynapseHostState {
-    async fn log(&mut self, level: bindgen::synapse::governance::logging::LogLevel, message: String) {
+    async fn log(
+        &mut self,
+        level: bindgen::synapse::governance::logging::LogLevel,
+        message: String,
+    ) {
         let level_str = match level {
             bindgen::synapse::governance::logging::LogLevel::Debug => "debug",
             bindgen::synapse::governance::logging::LogLevel::Info => "info",
@@ -941,18 +1026,18 @@ impl ComponentModelHost {
         wasm_config.async_support(true);
         wasm_config.consume_fuel(true);
         wasm_config.wasm_component_model(true);
-        
+
         let engine = wasmtime::Engine::new(&wasm_config)
             .map_err(|e| WasmHostError::LoadFailed(format!("Engine creation failed: {}", e)))?;
-        
+
         let mut linker = wasmtime::component::Linker::new(&engine);
-        
+
         // Add WIT interface implementations to the linker
         bindgen::PolicyEngine::add_to_linker(&mut linker, |state: &mut SynapseHostState| state)
             .map_err(|e| WasmHostError::LoadFailed(format!("Linker setup failed: {}", e)))?;
-        
+
         info!("ComponentModelHost initialized with wasmtime");
-        
+
         Ok(Self {
             engine,
             linker,
@@ -965,7 +1050,7 @@ impl ComponentModelHost {
     pub fn load_component(&mut self, wasm_bytes: &[u8]) -> WasmHostResult<()> {
         let component = wasmtime::component::Component::new(&self.engine, wasm_bytes)
             .map_err(|e| WasmHostError::LoadFailed(format!("Component load failed: {}", e)))?;
-        
+
         self.component = Some(component);
         info!("WASM component loaded");
         Ok(())
@@ -973,19 +1058,25 @@ impl ComponentModelHost {
 
     /// Evaluate an event using the loaded component
     pub async fn evaluate(&self, event: PolicyEvent) -> WasmHostResult<PolicyVerdict> {
-        let component = self.component.as_ref()
+        let component = self
+            .component
+            .as_ref()
             .ok_or_else(|| WasmHostError::EvaluationFailed("No component loaded".into()))?;
-        
+
         // Create a new store with fuel limit
         let mut store = wasmtime::Store::new(&self.engine, SynapseHostState::new());
-        store.set_fuel(self.config.max_fuel)
+        store
+            .set_fuel(self.config.max_fuel)
             .map_err(|e| WasmHostError::EvaluationFailed(format!("Set fuel failed: {}", e)))?;
-        
+
         // Instantiate the component
-        let (policy_engine, _instance) = bindgen::PolicyEngine::instantiate_async(&mut store, component, &self.linker)
-            .await
-            .map_err(|e| WasmHostError::InstantiateFailed(format!("Instantiation failed: {}", e)))?;
-        
+        let (policy_engine, _instance) =
+            bindgen::PolicyEngine::instantiate_async(&mut store, component, &self.linker)
+                .await
+                .map_err(|e| {
+                    WasmHostError::InstantiateFailed(format!("Instantiation failed: {}", e))
+                })?;
+
         // Convert our event to WIT format
         let wit_event = bindgen::PolicyEvent {
             event_type: event.event_type,
@@ -993,9 +1084,10 @@ impl ComponentModelHost {
             payload: event.payload,
             timestamp_us: event.timestamp_us,
         };
-        
+
         // Call the evaluate-event export
-        let verdict = policy_engine.call_evaluate_event(&mut store, &wit_event)
+        let verdict = policy_engine
+            .call_evaluate_event(&mut store, &wit_event)
             .await
             .map_err(|e| {
                 // Check if fuel was exhausted
@@ -1005,7 +1097,7 @@ impl ComponentModelHost {
                     WasmHostError::EvaluationFailed(format!("Evaluation failed: {}", e))
                 }
             })?;
-        
+
         Ok(PolicyVerdict {
             allow: verdict.allow,
             reason: verdict.reason,
@@ -1016,39 +1108,53 @@ impl ComponentModelHost {
 
     /// Initialize the loaded component
     pub async fn initialize(&self) -> WasmHostResult<bool> {
-        let component = self.component.as_ref()
+        let component = self
+            .component
+            .as_ref()
             .ok_or_else(|| WasmHostError::EvaluationFailed("No component loaded".into()))?;
-        
+
         let mut store = wasmtime::Store::new(&self.engine, SynapseHostState::new());
-        store.set_fuel(self.config.max_fuel)
+        store
+            .set_fuel(self.config.max_fuel)
             .map_err(|e| WasmHostError::EvaluationFailed(format!("Set fuel failed: {}", e)))?;
-        
-        let (policy_engine, _instance) = bindgen::PolicyEngine::instantiate_async(&mut store, component, &self.linker)
-            .await
-            .map_err(|e| WasmHostError::InstantiateFailed(format!("Instantiation failed: {}", e)))?;
-        
-        policy_engine.call_initialize(&mut store)
+
+        let (policy_engine, _instance) =
+            bindgen::PolicyEngine::instantiate_async(&mut store, component, &self.linker)
+                .await
+                .map_err(|e| {
+                    WasmHostError::InstantiateFailed(format!("Instantiation failed: {}", e))
+                })?;
+
+        policy_engine
+            .call_initialize(&mut store)
             .await
             .map_err(|e| WasmHostError::EvaluationFailed(format!("Initialize failed: {}", e)))
     }
 
     /// Get metadata from the loaded component
     pub async fn get_metadata(&self) -> WasmHostResult<PolicyMetadata> {
-        let component = self.component.as_ref()
+        let component = self
+            .component
+            .as_ref()
             .ok_or_else(|| WasmHostError::EvaluationFailed("No component loaded".into()))?;
-        
+
         let mut store = wasmtime::Store::new(&self.engine, SynapseHostState::new());
-        store.set_fuel(self.config.max_fuel)
+        store
+            .set_fuel(self.config.max_fuel)
             .map_err(|e| WasmHostError::EvaluationFailed(format!("Set fuel failed: {}", e)))?;
-        
-        let (policy_engine, _instance) = bindgen::PolicyEngine::instantiate_async(&mut store, component, &self.linker)
-            .await
-            .map_err(|e| WasmHostError::InstantiateFailed(format!("Instantiation failed: {}", e)))?;
-        
-        let meta = policy_engine.call_get_metadata(&mut store)
+
+        let (policy_engine, _instance) =
+            bindgen::PolicyEngine::instantiate_async(&mut store, component, &self.linker)
+                .await
+                .map_err(|e| {
+                    WasmHostError::InstantiateFailed(format!("Instantiation failed: {}", e))
+                })?;
+
+        let meta = policy_engine
+            .call_get_metadata(&mut store)
             .await
             .map_err(|e| WasmHostError::EvaluationFailed(format!("Get metadata failed: {}", e)))?;
-        
+
         Ok(PolicyMetadata {
             name: meta.name,
             version: meta.version,
@@ -1112,11 +1218,21 @@ mod tests {
 /// Verify cgroup membership at startup
 ///
 /// This ensures the broker is running in the expected cgroup hierarchy.
-/// If verification fails, the broker MUST NOT start.
+///
+/// **Actual current behavior**: enforcement only happens on `target_os =
+/// "linux"`. On Linux, if the process is not in a verified cgroup (and
+/// `SYNAPSE_SKIP_CGROUP_CHECK` is not set), this returns an `Err` and
+/// [`verify_cgroup_or_panic`] will panic. On non-Linux platforms (including
+/// this development machine), cgroup verification is not supported at all —
+/// the check is skipped entirely with a `warn!` log, and startup proceeds
+/// regardless. This is intentional so local development on non-Linux hosts
+/// is not blocked; it means the Environmental Entanglement guarantee this
+/// function's name implies is Linux-only in this build.
 ///
 /// # Panics
 ///
-/// Panics if the process is not in a verified cgroup.
+/// Does not panic itself; see [`verify_cgroup_or_panic`] for the panicking
+/// wrapper used at startup.
 pub fn verify_cgroup_at_startup() -> Result<(), String> {
     #[cfg(target_os = "linux")]
     {
@@ -1125,9 +1241,9 @@ pub fn verify_cgroup_at_startup() -> Result<(), String> {
 
         // Check for verified cgroup membership
         // Format: "0::/synapse/verified" or similar
-        let verified = cgroup_path.lines().any(|line| {
-            line.contains("synapse") && line.contains("verified")
-        });
+        let verified = cgroup_path
+            .lines()
+            .any(|line| line.contains("synapse") && line.contains("verified"));
 
         if !verified {
             // Check environment override for development
@@ -1200,7 +1316,8 @@ pub fn encrypt_module(
     let cipher = Aes256Gcm::new_from_slice(&key)
         .map_err(|e| WasmHostError::DecryptionFailed(format!("Invalid key: {}", e)))?;
 
-    let ciphertext = cipher.encrypt(&nonce, wasm_bytes)
+    let ciphertext = cipher
+        .encrypt(&nonce, wasm_bytes)
         .map_err(|e| WasmHostError::DecryptionFailed(format!("Encryption failed: {}", e)))?;
 
     // Build encrypted module
@@ -1220,11 +1337,7 @@ pub fn encrypt_module(
 }
 
 /// Derive encryption key from environment parameters
-fn derive_key(
-    trusted_pids: &[u32],
-    machine_id: &str,
-    cluster_secret: Option<&str>,
-) -> [u8; 32] {
+fn derive_key(trusted_pids: &[u32], machine_id: &str, cluster_secret: Option<&str>) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(b"synapse-wasm-key-v1");
 
@@ -1258,12 +1371,7 @@ mod encryption_tests {
         let cluster_secret = Some("test-secret");
 
         // Encrypt
-        let encrypted = encrypt_module(
-            wasm,
-            &trusted_pids,
-            machine_id,
-            cluster_secret,
-        ).unwrap();
+        let encrypted = encrypt_module(wasm, &trusted_pids, machine_id, cluster_secret).unwrap();
 
         // Verify format
         assert!(encrypted.starts_with(b"SYNW"));

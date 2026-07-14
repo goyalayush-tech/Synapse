@@ -27,10 +27,11 @@ pub struct SessionId(u128);
 impl SessionId {
     /// Creates a new random session ID.
     ///
-    /// Uses the system's random number generator for entropy.
+    /// Backed by a UUIDv4 (RFC 4122), which uses the operating system's CSPRNG
+    /// for entropy - this avoids the collision risk of hashing a coarse
+    /// timestamp.
     #[must_use]
     pub fn new() -> Self {
-        // Using a simple approach; in production, consider uuid or similar
         Self(rand_u128())
     }
 
@@ -62,27 +63,14 @@ impl fmt::Display for SessionId {
     }
 }
 
-/// Simple random u128 generation without external dependencies.
-/// In production, replace with a proper RNG crate if needed.
+/// Generates 128 bits of randomness backed by a UUIDv4.
+///
+/// Previously this hashed a nanosecond timestamp with `DefaultHasher`, which
+/// is not a CSPRNG and could collide under concurrent calls within the same
+/// clock tick. `uuid::Uuid::new_v4()` draws from the OS random number
+/// generator, so it doesn't have that weakness.
 fn rand_u128() -> u128 {
-    use std::collections::hash_map::RandomState;
-    use std::hash::{BuildHasher, Hasher};
-
-    let state = RandomState::new();
-    let mut hasher = state.build_hasher();
-    hasher.write_u64(std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u64)
-        .unwrap_or(0));
-    
-    let high = hasher.finish();
-    
-    let state2 = RandomState::new();
-    let mut hasher2 = state2.build_hasher();
-    hasher2.write_u64(high);
-    let low = hasher2.finish();
-    
-    ((high as u128) << 64) | (low as u128)
+    uuid::Uuid::new_v4().as_u128()
 }
 
 /// A port number for network binding.

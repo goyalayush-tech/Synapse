@@ -46,6 +46,12 @@ pub const DEFAULT_WINDOWS_PIPE_NAME: &str = r"\\.\pipe\spire-agent\public\api";
 /// Environment variable for SPIRE agent address.
 pub const SPIFFE_ENDPOINT_ENV: &str = "SPIFFE_ENDPOINT_SOCKET";
 
+/// Maximum length, in bytes, of a SPIFFE ID.
+///
+/// The SPIFFE specification conventionally caps SPIFFE IDs at 2048 bytes;
+/// implementations are expected to reject anything longer.
+pub const MAX_SPIFFE_ID_LENGTH: usize = 2048;
+
 /// Errors that can occur during SPIFFE operations.
 #[derive(Debug, Error)]
 pub enum SpiffeError {
@@ -143,12 +149,18 @@ impl SpiffeIdentity {
     /// Returns the time until expiration.
     #[must_use]
     pub fn time_until_expiration(&self) -> Option<Duration> {
-        self.expires_at
-            .duration_since(SystemTime::now())
-            .ok()
+        self.expires_at.duration_since(SystemTime::now()).ok()
     }
 
     /// Validates the SPIFFE ID format.
+    ///
+    /// Per the SPIFFE specification, this checks that:
+    /// - The ID starts with `spiffe://`.
+    /// - The ID does not exceed [`MAX_SPIFFE_ID_LENGTH`] bytes.
+    /// - The trust domain is non-empty and contains only lowercase letters,
+    ///   digits, `.`, `-`, and `_`.
+    /// - Path segments (if any) are not empty (e.g. `spiffe://example.org//foo`
+    ///   is rejected).
     ///
     /// # Errors
     ///
@@ -161,11 +173,39 @@ impl SpiffeIdentity {
             ));
         }
 
+        // Enforce a maximum overall length.
+        if spiffe_id.len() > MAX_SPIFFE_ID_LENGTH {
+            return Err(SpiffeError::InvalidSpiffeId(format!(
+                "SPIFFE ID exceeds maximum length of {MAX_SPIFFE_ID_LENGTH} bytes (got {})",
+                spiffe_id.len()
+            )));
+        }
+
         // Must have at least a trust domain
         let parts: Vec<&str> = spiffe_id[9..].split('/').collect();
-        if parts.is_empty() || parts[0].is_empty() {
+        let trust_domain = parts[0];
+        if trust_domain.is_empty() {
             return Err(SpiffeError::InvalidSpiffeId(
                 "SPIFFE ID must include a trust domain".to_string(),
+            ));
+        }
+
+        // Trust domain must only contain lowercase letters, digits, '.', '-', '_'.
+        if !trust_domain
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '.' | '-' | '_'))
+        {
+            return Err(SpiffeError::InvalidSpiffeId(format!(
+                "SPIFFE trust domain '{trust_domain}' contains invalid characters; only \
+                 lowercase letters, digits, '.', '-', and '_' are allowed"
+            )));
+        }
+
+        // Path segments (if any) must not be empty, e.g. reject
+        // "spiffe://example.org//foo" and "spiffe://example.org/foo/".
+        if parts[1..].iter().any(|segment| segment.is_empty()) {
+            return Err(SpiffeError::InvalidSpiffeId(
+                "SPIFFE ID path must not contain empty segments".to_string(),
             ));
         }
 
@@ -299,9 +339,8 @@ impl SpiffeClient {
     #[must_use]
     pub fn new(endpoint: impl Into<String>) -> Self {
         let endpoint_str = endpoint.into();
-        Self::from_endpoint_string(&endpoint_str).unwrap_or_else(|_| {
-            Self::with_unix_socket(&endpoint_str)
-        })
+        Self::from_endpoint_string(&endpoint_str)
+            .unwrap_or_else(|_| Self::with_unix_socket(&endpoint_str))
     }
 
     /// Fetches an SVID for the given SPIFFE ID.
@@ -319,9 +358,9 @@ impl SpiffeClient {
         svids
             .into_iter()
             .find(|s| s.spiffe_id == spiffe_id)
-            .ok_or_else(|| SpiffeError::FetchFailed(format!(
-                "SVID not found for SPIFFE ID: {spiffe_id}"
-            )))
+            .ok_or_else(|| {
+                SpiffeError::FetchFailed(format!("SVID not found for SPIFFE ID: {spiffe_id}"))
+            })
     }
 
     /// Fetches all available SVIDs for the current workload.
@@ -335,7 +374,7 @@ impl SpiffeClient {
     pub async fn fetch_all_svids(&self) -> SpiffeResult<Vec<SpiffeIdentity>> {
         // Connect to SPIRE agent
         let response = self.call_workload_api().await?;
-        
+
         // Parse response
         self.parse_svid_response(&response)
     }
@@ -343,15 +382,9 @@ impl SpiffeClient {
     /// Calls the SPIRE Workload API.
     async fn call_workload_api(&self) -> SpiffeResult<Vec<u8>> {
         match &self.endpoint {
-            SpiffeEndpoint::UnixSocket(path) => {
-                self.call_via_unix_socket(path).await
-            }
-            SpiffeEndpoint::NamedPipe(name) => {
-                self.call_via_named_pipe(name).await
-            }
-            SpiffeEndpoint::Tcp(addr) => {
-                self.call_via_tcp(addr).await
-            }
+            SpiffeEndpoint::UnixSocket(path) => self.call_via_unix_socket(path).await,
+            SpiffeEndpoint::NamedPipe(name) => self.call_via_named_pipe(name).await,
+            SpiffeEndpoint::Tcp(addr) => self.call_via_tcp(addr).await,
         }
     }
 
@@ -361,17 +394,16 @@ impl SpiffeClient {
         use tokio::net::UnixStream;
 
         if !path.exists() {
-            return Err(SpiffeError::SocketNotFound(
-                path.display().to_string()
-            ));
+            return Err(SpiffeError::SocketNotFound(path.display().to_string()));
         }
 
-        let mut stream = UnixStream::connect(path).await.map_err(|e| {
-            SpiffeError::ConnectionFailed {
-                endpoint: path.display().to_string(),
-                message: e.to_string(),
-            }
-        })?;
+        let mut stream =
+            UnixStream::connect(path)
+                .await
+                .map_err(|e| SpiffeError::ConnectionFailed {
+                    endpoint: path.display().to_string(),
+                    message: e.to_string(),
+                })?;
 
         // Send gRPC request for FetchX509SVID
         // Note: In production, this would use proper gRPC framing
@@ -417,12 +449,13 @@ impl SpiffeClient {
     async fn call_via_tcp(&self, addr: &str) -> SpiffeResult<Vec<u8>> {
         use tokio::net::TcpStream;
 
-        let mut stream = TcpStream::connect(addr).await.map_err(|e| {
-            SpiffeError::ConnectionFailed {
-                endpoint: addr.to_string(),
-                message: e.to_string(),
-            }
-        })?;
+        let mut stream =
+            TcpStream::connect(addr)
+                .await
+                .map_err(|e| SpiffeError::ConnectionFailed {
+                    endpoint: addr.to_string(),
+                    message: e.to_string(),
+                })?;
 
         let request = self.build_fetch_request();
         stream.write_all(&request).await?;
@@ -452,15 +485,15 @@ impl SpiffeClient {
         //   - x509_svid: bytes (DER-encoded certificate)
         //   - x509_svid_key: bytes (PKCS#8 private key)
         //   - bundle: bytes (trust bundle)
-        
+
         // For now, return empty - real implementation needs protobuf
         tracing::warn!(
             "SPIRE Workload API integration requires protobuf. \
              Install spiffe-rs crate for full support."
         );
-        
+
         Err(SpiffeError::ProtocolError(
-            "Protobuf parsing not implemented. Use spiffe-rs crate for production.".to_string()
+            "Protobuf parsing not implemented. Use spiffe-rs crate for production.".to_string(),
         ))
     }
 
@@ -554,8 +587,12 @@ mod tests {
 
     #[test]
     fn validate_spiffe_id_valid() {
-        assert!(SpiffeIdentity::validate_spiffe_id("spiffe://example.org/workload/agent-1").is_ok());
-        assert!(SpiffeIdentity::validate_spiffe_id("spiffe://trust.domain/path/to/workload").is_ok());
+        assert!(
+            SpiffeIdentity::validate_spiffe_id("spiffe://example.org/workload/agent-1").is_ok()
+        );
+        assert!(
+            SpiffeIdentity::validate_spiffe_id("spiffe://trust.domain/path/to/workload").is_ok()
+        );
     }
 
     #[test]
@@ -566,8 +603,44 @@ mod tests {
     }
 
     #[test]
+    fn validate_spiffe_id_rejects_invalid_trust_domain_chars() {
+        // Uppercase letters are not allowed in the trust domain.
+        assert!(SpiffeIdentity::validate_spiffe_id("spiffe://Example.org/workload").is_err());
+        // Spaces are not allowed.
+        assert!(SpiffeIdentity::validate_spiffe_id("spiffe://exa mple.org/workload").is_err());
+        // Other punctuation (e.g. '!') is not allowed.
+        assert!(SpiffeIdentity::validate_spiffe_id("spiffe://example!.org/workload").is_err());
+        // Lowercase letters, digits, '.', '-', '_' are all allowed.
+        assert!(SpiffeIdentity::validate_spiffe_id("spiffe://ex-ample_1.org/workload").is_ok());
+    }
+
+    #[test]
+    fn validate_spiffe_id_rejects_empty_path_segments() {
+        assert!(SpiffeIdentity::validate_spiffe_id("spiffe://example.org//foo").is_err());
+        assert!(SpiffeIdentity::validate_spiffe_id("spiffe://example.org/foo//bar").is_err());
+        assert!(SpiffeIdentity::validate_spiffe_id("spiffe://example.org/foo/").is_err());
+        // A single, non-empty path segment is fine.
+        assert!(SpiffeIdentity::validate_spiffe_id("spiffe://example.org/foo").is_ok());
+    }
+
+    #[test]
+    fn validate_spiffe_id_rejects_oversized_id() {
+        let oversized = format!("spiffe://example.org/{}", "a".repeat(MAX_SPIFFE_ID_LENGTH));
+        assert!(oversized.len() > MAX_SPIFFE_ID_LENGTH);
+        assert!(SpiffeIdentity::validate_spiffe_id(&oversized).is_err());
+
+        // A SPIFFE ID right at the boundary should still be accepted.
+        let prefix_len = "spiffe://example.org/".len();
+        let path_len = MAX_SPIFFE_ID_LENGTH - prefix_len;
+        let boundary = format!("spiffe://example.org/{}", "a".repeat(path_len));
+        assert_eq!(boundary.len(), MAX_SPIFFE_ID_LENGTH);
+        assert!(SpiffeIdentity::validate_spiffe_id(&boundary).is_ok());
+    }
+
+    #[test]
     fn parse_spiffe_id() {
-        let parsed = SpiffeId::parse("spiffe://example.org/workload/agent-1").expect("valid spiffe id");
+        let parsed =
+            SpiffeId::parse("spiffe://example.org/workload/agent-1").expect("valid spiffe id");
         assert_eq!(parsed.trust_domain, "example.org");
         assert_eq!(parsed.path, Some("workload/agent-1".to_string()));
     }
@@ -619,12 +692,12 @@ mod tests {
             .expect("valid unix endpoint");
         assert!(matches!(unix.endpoint(), SpiffeEndpoint::UnixSocket(_)));
 
-        let tcp = SpiffeClient::from_endpoint_string("tcp://localhost:8081")
-            .expect("valid tcp endpoint");
+        let tcp =
+            SpiffeClient::from_endpoint_string("tcp://localhost:8081").expect("valid tcp endpoint");
         assert!(matches!(tcp.endpoint(), SpiffeEndpoint::Tcp(_)));
 
-        let npipe = SpiffeClient::from_endpoint_string("npipe:///pipe/test")
-            .expect("valid npipe endpoint");
+        let npipe =
+            SpiffeClient::from_endpoint_string("npipe:///pipe/test").expect("valid npipe endpoint");
         assert!(matches!(npipe.endpoint(), SpiffeEndpoint::NamedPipe(_)));
     }
 
@@ -638,4 +711,3 @@ mod tests {
         assert!(matches!(client.endpoint(), SpiffeEndpoint::UnixSocket(_)));
     }
 }
-

@@ -15,13 +15,13 @@
 //! - Membership changes (add/remove nodes)
 //! - Snapshot support for log compaction
 
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
-use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tokio::sync::{RwLock, broadcast};
-use tracing::{debug, info, error, instrument};
+use tokio::sync::{broadcast, RwLock};
+use tracing::{debug, error, info, instrument};
 
 /// Errors that can occur during consensus operations.
 #[derive(Debug, Error)]
@@ -83,7 +83,11 @@ pub struct Proposal {
 impl Proposal {
     /// Creates a new proposal.
     #[must_use]
-    pub fn new(id: impl Into<String>, proposer: impl Into<String>, content: serde_json::Value) -> Self {
+    pub fn new(
+        id: impl Into<String>,
+        proposer: impl Into<String>,
+        content: serde_json::Value,
+    ) -> Self {
         Self {
             id: id.into(),
             proposer: proposer.into(),
@@ -142,6 +146,12 @@ impl ConsensusProtocol for JudgeConsensus {
         proposals: Vec<Proposal>,
         _policy: Option<serde_json::Value>,
     ) -> ConsensusResult<Proposal> {
+        tracing::warn!(
+            "JudgeConsensus::resolve is a stub: it does not evaluate proposals against \
+             any policy, it always returns the first proposal in the list. This is not \
+             real judge-based consensus."
+        );
+
         if proposals.is_empty() {
             return Err(ConsensusError::InvalidProposal(
                 "No proposals provided".to_string(),
@@ -189,6 +199,12 @@ impl ConsensusProtocol for DebateConsensus {
         proposals: Vec<Proposal>,
         _policy: Option<serde_json::Value>,
     ) -> ConsensusResult<Proposal> {
+        tracing::warn!(
+            "DebateConsensus::resolve is a stub: no debate rounds are run and no \
+             critiques are exchanged between agents, it always returns the first \
+             proposal in the list. This is not real multi-round debate consensus."
+        );
+
         if proposals.is_empty() {
             return Err(ConsensusError::InvalidProposal(
                 "No proposals provided".to_string(),
@@ -462,7 +478,14 @@ impl RaftNode {
     /// Create a new Raft node
     pub fn new(config: RaftConfig) -> (Self, broadcast::Receiver<RaftEvent>) {
         let (event_tx, event_rx) = broadcast::channel(100);
-        
+
+        tracing::warn!(
+            "RaftNode leader election is NOT implemented in this build: there is no \
+             election-timeout loop and no vote-counting logic to transition a Candidate \
+             to Leader. Nodes will remain Followers forever unless externally driven, so \
+             RaftNode::propose() will always return ConsensusError::NotLeader."
+        );
+
         (
             Self {
                 config,
@@ -525,19 +548,49 @@ impl RaftNode {
 
     /// Handle incoming Raft message
     #[instrument(skip(self, msg))]
-    pub async fn handle_message(&self, from: &str, msg: RaftMessage) -> ConsensusResult<Option<RaftMessage>> {
+    pub async fn handle_message(
+        &self,
+        from: &str,
+        msg: RaftMessage,
+    ) -> ConsensusResult<Option<RaftMessage>> {
         match msg {
-            RaftMessage::RequestVote { term, candidate_id, last_log_index, last_log_term } => {
-                self.handle_request_vote(term, &candidate_id, last_log_index, last_log_term).await
+            RaftMessage::RequestVote {
+                term,
+                candidate_id,
+                last_log_index,
+                last_log_term,
+            } => {
+                self.handle_request_vote(term, &candidate_id, last_log_index, last_log_term)
+                    .await
             }
             RaftMessage::RequestVoteResponse { term, vote_granted } => {
                 self.handle_vote_response(from, term, vote_granted).await
             }
-            RaftMessage::AppendEntries { term, leader_id, prev_log_index, prev_log_term, entries, leader_commit } => {
-                self.handle_append_entries(term, &leader_id, prev_log_index, prev_log_term, entries, leader_commit).await
+            RaftMessage::AppendEntries {
+                term,
+                leader_id,
+                prev_log_index,
+                prev_log_term,
+                entries,
+                leader_commit,
+            } => {
+                self.handle_append_entries(
+                    term,
+                    &leader_id,
+                    prev_log_index,
+                    prev_log_term,
+                    entries,
+                    leader_commit,
+                )
+                .await
             }
-            RaftMessage::AppendEntriesResponse { term, success, match_index } => {
-                self.handle_append_response(from, term, success, match_index).await
+            RaftMessage::AppendEntriesResponse {
+                term,
+                success,
+                match_index,
+            } => {
+                self.handle_append_response(from, term, success, match_index)
+                    .await
             }
         }
     }
@@ -550,7 +603,7 @@ impl RaftNode {
         last_log_term: u64,
     ) -> ConsensusResult<Option<RaftMessage>> {
         let mut persistent = self.persistent.write().await;
-        
+
         // Update term if needed
         if term > persistent.current_term {
             persistent.current_term = term;
@@ -560,13 +613,16 @@ impl RaftNode {
 
         let vote_granted = if term < persistent.current_term {
             false
-        } else if persistent.voted_for.is_none() || persistent.voted_for.as_deref() == Some(candidate_id) {
+        } else if persistent.voted_for.is_none()
+            || persistent.voted_for.as_deref() == Some(candidate_id)
+        {
             // Check if candidate's log is at least as up-to-date
             let our_last_term = persistent.log.last().map(|e| e.term).unwrap_or(0);
             let our_last_index = persistent.log.len() as u64;
-            
-            if last_log_term > our_last_term || 
-               (last_log_term == our_last_term && last_log_index >= our_last_index) {
+
+            if last_log_term > our_last_term
+                || (last_log_term == our_last_term && last_log_index >= our_last_index)
+            {
                 persistent.voted_for = Some(candidate_id.to_string());
                 true
             } else {
@@ -576,7 +632,10 @@ impl RaftNode {
             false
         };
 
-        debug!("Vote request from {}: granted={}", candidate_id, vote_granted);
+        debug!(
+            "Vote request from {}: granted={}",
+            candidate_id, vote_granted
+        );
 
         Ok(Some(RaftMessage::RequestVoteResponse {
             term: persistent.current_term,
@@ -591,7 +650,7 @@ impl RaftNode {
         vote_granted: bool,
     ) -> ConsensusResult<Option<RaftMessage>> {
         let mut persistent = self.persistent.write().await;
-        
+
         if term > persistent.current_term {
             persistent.current_term = term;
             persistent.voted_for = None;
@@ -618,7 +677,7 @@ impl RaftNode {
         leader_commit: u64,
     ) -> ConsensusResult<Option<RaftMessage>> {
         let mut persistent = self.persistent.write().await;
-        
+
         // Update term if needed
         if term > persistent.current_term {
             persistent.current_term = term;
@@ -699,7 +758,7 @@ impl RaftNode {
         match_index: u64,
     ) -> ConsensusResult<Option<RaftMessage>> {
         let mut persistent = self.persistent.write().await;
-        
+
         if term > persistent.current_term {
             persistent.current_term = term;
             persistent.voted_for = None;
@@ -729,7 +788,11 @@ impl RaftNode {
         Ok(None)
     }
 
-    async fn apply_committed(&self, persistent: &RaftPersistentState, volatile: &mut RaftVolatileState) {
+    async fn apply_committed(
+        &self,
+        persistent: &RaftPersistentState,
+        volatile: &mut RaftVolatileState,
+    ) {
         while volatile.last_applied < volatile.commit_index {
             volatile.last_applied += 1;
             if let Some(entry) = persistent.log.get(volatile.last_applied as usize - 1) {
@@ -790,7 +853,9 @@ impl RaftNode {
 
         let mut cluster = self.cluster.write().await;
         cluster.nodes.retain(|n| n.id != node_id);
-        let _ = self.event_tx.send(RaftEvent::NodeRemoved(node_id.to_string()));
+        let _ = self
+            .event_tx
+            .send(RaftEvent::NodeRemoved(node_id.to_string()));
         Ok(())
     }
 
@@ -819,9 +884,11 @@ mod tests {
     #[tokio::test]
     async fn debate_consensus_resolve() {
         let consensus = DebateConsensus::new(3, 10);
-        let proposals = vec![
-            Proposal::new("prop-1", "agent-1", serde_json::json!({"plan": "A"})),
-        ];
+        let proposals = vec![Proposal::new(
+            "prop-1",
+            "agent-1",
+            serde_json::json!({"plan": "A"}),
+        )];
 
         let result = consensus.resolve(proposals, None).await.unwrap();
         assert_eq!(result.id, "prop-1");
@@ -831,7 +898,7 @@ mod tests {
     async fn raft_node_creation() {
         let config = RaftConfig::default();
         let (node, _events) = RaftNode::new(config);
-        
+
         assert_eq!(node.get_state().await, RaftState::Follower);
         assert_eq!(node.get_term().await, 0);
         assert!(node.get_leader().await.is_none());
@@ -856,7 +923,10 @@ mod tests {
         let response = node.handle_message("node-2", msg).await.unwrap();
         assert!(matches!(
             response,
-            Some(RaftMessage::RequestVoteResponse { vote_granted: true, .. })
+            Some(RaftMessage::RequestVoteResponse {
+                vote_granted: true,
+                ..
+            })
         ));
     }
 
@@ -883,8 +953,7 @@ mod tests {
             response,
             Some(RaftMessage::AppendEntriesResponse { success: true, .. })
         ));
-        
+
         assert_eq!(node.get_leader().await, Some("leader".to_string()));
     }
 }
-

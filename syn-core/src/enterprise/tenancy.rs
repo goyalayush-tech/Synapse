@@ -2,7 +2,11 @@
 //!
 //! This module provides enterprise-grade multi-tenancy for Synapse:
 //!
-//! - **Tenant Isolation**: Cryptographic namespace separation
+//! - **Tenant Isolation**: String-based namespace separation (fully-qualified
+//!   names are prefixed with the tenant ID, e.g. `tenant-a/my-namespace`).
+//!   This is a logical naming convention, not cryptographic isolation - it
+//!   relies on callers consistently scoping lookups by namespace and does not
+//!   by itself prevent cross-tenant access at the storage layer.
 //! - **Resource Quotas**: CPU, memory, storage, and request limits
 //! - **Data Segregation**: Tenant data is logically isolated
 //! - **Billing Integration**: Usage tracking per tenant
@@ -31,11 +35,11 @@
 //! └─────────────────────────────────────────────────────────────────┘
 //! ```
 
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::{Duration, SystemTime};
-use tokio::sync::RwLock;
-use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use tokio::sync::RwLock;
 
 /// Unique identifier for a tenant.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -46,7 +50,7 @@ impl TenantId {
     pub fn new(id: impl Into<String>) -> Self {
         Self(id.into())
     }
-    
+
     /// Get the string representation.
     pub fn as_str(&self) -> &str {
         &self.0
@@ -61,8 +65,10 @@ impl std::fmt::Display for TenantId {
 
 /// Namespace for tenant isolation.
 ///
-/// Each tenant has one or more namespaces that provide logical
-/// isolation for their data and resources.
+/// Each tenant has one or more namespaces that provide logical isolation for
+/// their data and resources via string-prefixed naming (see `fqn`). This is
+/// not cryptographic isolation - it does not encrypt or cryptographically
+/// separate data, it only namespaces keys/paths by tenant ID.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Namespace {
     /// Namespace name
@@ -88,8 +94,11 @@ impl Namespace {
             metadata: HashMap::new(),
         }
     }
-    
-    /// Generate the fully-qualified namespace path.
+
+    /// Generate the fully-qualified namespace path (`tenant_id/name`).
+    ///
+    /// This is plain string concatenation, not a cryptographic
+    /// derivation - it provides naming-convention isolation only.
     pub fn fqn(&self) -> String {
         format!("{}/{}", self.tenant_id, self.name)
     }
@@ -153,18 +162,19 @@ impl ResourceUsage {
             && self.active_connections <= quota.max_connections
             && self.namespace_count <= quota.max_namespaces
     }
-    
+
     /// Reset daily counters if needed.
     pub fn maybe_reset_daily(&mut self) {
         let now = SystemTime::now();
-        let should_reset = self.last_daily_reset
+        let should_reset = self
+            .last_daily_reset
             .map(|last| {
                 now.duration_since(last)
                     .map(|d| d.as_secs() >= 86400)
                     .unwrap_or(true)
             })
             .unwrap_or(true);
-        
+
         if should_reset {
             self.events_today = 0;
             self.last_daily_reset = Some(now);
@@ -304,28 +314,34 @@ impl Tenant {
             billing_id: None,
         }
     }
-    
+
     /// Check if the tenant can accept new requests.
     pub fn can_accept_requests(&self) -> bool {
         matches!(self.status, TenantStatus::Active | TenantStatus::Trial)
             && self.usage.is_within_quota(&self.quota)
     }
-    
+
     /// Update last activity timestamp.
     pub fn touch(&mut self) {
         self.last_active_at = SystemTime::now();
     }
-    
+
     /// Record resource usage.
     pub fn record_usage(&mut self, storage_delta: i64, events: u64) {
         self.usage.maybe_reset_daily();
-        
+
         if storage_delta >= 0 {
-            self.usage.storage_bytes = self.usage.storage_bytes.saturating_add(storage_delta as u64);
+            self.usage.storage_bytes = self
+                .usage
+                .storage_bytes
+                .saturating_add(storage_delta as u64);
         } else {
-            self.usage.storage_bytes = self.usage.storage_bytes.saturating_sub((-storage_delta) as u64);
+            self.usage.storage_bytes = self
+                .usage
+                .storage_bytes
+                .saturating_sub((-storage_delta) as u64);
         }
-        
+
         self.usage.events_today = self.usage.events_today.saturating_add(events);
         self.touch();
     }
@@ -337,15 +353,15 @@ pub enum TenantError {
     /// Tenant not found
     #[error("Tenant not found: {0}")]
     NotFound(TenantId),
-    
+
     /// Tenant already exists
     #[error("Tenant already exists: {0}")]
     AlreadyExists(TenantId),
-    
+
     /// Tenant is not active
     #[error("Tenant is not active: {0} (status: {1:?})")]
     NotActive(TenantId, TenantStatus),
-    
+
     /// Quota exceeded
     #[error("Quota exceeded for tenant {tenant}: {resource}")]
     QuotaExceeded {
@@ -354,15 +370,15 @@ pub enum TenantError {
         /// Resource that exceeded quota
         resource: String,
     },
-    
+
     /// Namespace not found
     #[error("Namespace not found: {0}")]
     NamespaceNotFound(String),
-    
+
     /// Namespace already exists
     #[error("Namespace already exists: {0}")]
     NamespaceAlreadyExists(String),
-    
+
     /// Invalid tenant configuration
     #[error("Invalid tenant configuration: {0}")]
     InvalidConfig(String),
@@ -417,7 +433,7 @@ impl TenantManager {
             namespaces: RwLock::new(HashMap::new()),
         }
     }
-    
+
     /// Create a new tenant.
     pub async fn create_tenant(
         &self,
@@ -426,23 +442,23 @@ impl TenantManager {
         tier: Option<TenantTier>,
     ) -> TenantResult<Tenant> {
         let mut tenants = self.tenants.write().await;
-        
+
         if tenants.contains_key(&id) {
             return Err(TenantError::AlreadyExists(id));
         }
-        
+
         let tier = tier.unwrap_or(self.config.default_tier);
         let tenant = Tenant::new(id.clone(), name, tier);
-        
+
         // Create default namespace
         let default_ns = Namespace::new("default", id.clone());
         let mut namespaces = self.namespaces.write().await;
         namespaces.insert(default_ns.fqn(), default_ns);
-        
+
         tenants.insert(id, tenant.clone());
         Ok(tenant)
     }
-    
+
     /// Get a tenant by ID.
     pub async fn get_tenant(&self, id: &TenantId) -> TenantResult<Tenant> {
         let tenants = self.tenants.read().await;
@@ -451,46 +467,46 @@ impl TenantManager {
             .cloned()
             .ok_or_else(|| TenantError::NotFound(id.clone()))
     }
-    
+
     /// Update a tenant.
     pub async fn update_tenant(&self, tenant: Tenant) -> TenantResult<()> {
         let mut tenants = self.tenants.write().await;
-        
+
         if !tenants.contains_key(&tenant.id) {
             return Err(TenantError::NotFound(tenant.id.clone()));
         }
-        
+
         tenants.insert(tenant.id.clone(), tenant);
         Ok(())
     }
-    
+
     /// Delete a tenant (marks for deletion).
     pub async fn delete_tenant(&self, id: &TenantId) -> TenantResult<()> {
         let mut tenants = self.tenants.write().await;
-        
+
         let tenant = tenants
             .get_mut(id)
             .ok_or_else(|| TenantError::NotFound(id.clone()))?;
-        
+
         tenant.status = TenantStatus::PendingDeletion;
         Ok(())
     }
-    
+
     /// Validate that a tenant can accept requests.
     pub async fn validate_tenant(&self, id: &TenantId) -> TenantResult<()> {
         let tenants = self.tenants.read().await;
-        
+
         let tenant = tenants
             .get(id)
             .ok_or_else(|| TenantError::NotFound(id.clone()))?;
-        
+
         if !tenant.can_accept_requests() {
             return Err(TenantError::NotActive(id.clone(), tenant.status));
         }
-        
+
         Ok(())
     }
-    
+
     /// Create a namespace for a tenant.
     pub async fn create_namespace(
         &self,
@@ -501,28 +517,28 @@ impl TenantManager {
         let tenant = tenants
             .get_mut(tenant_id)
             .ok_or_else(|| TenantError::NotFound(tenant_id.clone()))?;
-        
+
         if tenant.usage.namespace_count >= tenant.quota.max_namespaces {
             return Err(TenantError::QuotaExceeded {
                 tenant: tenant_id.clone(),
                 resource: "namespaces".to_string(),
             });
         }
-        
+
         let namespace = Namespace::new(name, tenant_id.clone());
         let fqn = namespace.fqn();
-        
+
         let mut namespaces = self.namespaces.write().await;
         if namespaces.contains_key(&fqn) {
             return Err(TenantError::NamespaceAlreadyExists(fqn));
         }
-        
+
         tenant.usage.namespace_count += 1;
         namespaces.insert(fqn, namespace.clone());
-        
+
         Ok(namespace)
     }
-    
+
     /// Get a namespace.
     pub async fn get_namespace(&self, fqn: &str) -> TenantResult<Namespace> {
         let namespaces = self.namespaces.read().await;
@@ -531,7 +547,7 @@ impl TenantManager {
             .cloned()
             .ok_or_else(|| TenantError::NamespaceNotFound(fqn.to_string()))
     }
-    
+
     /// List all namespaces for a tenant.
     pub async fn list_namespaces(&self, tenant_id: &TenantId) -> Vec<Namespace> {
         let namespaces = self.namespaces.read().await;
@@ -541,7 +557,7 @@ impl TenantManager {
             .cloned()
             .collect()
     }
-    
+
     /// Record usage for a tenant.
     pub async fn record_usage(
         &self,
@@ -553,27 +569,27 @@ impl TenantManager {
         let tenant = tenants
             .get_mut(tenant_id)
             .ok_or_else(|| TenantError::NotFound(tenant_id.clone()))?;
-        
+
         tenant.record_usage(storage_delta, events);
-        
+
         // Check if quota exceeded and auto-suspend is enabled
         if self.config.auto_suspend_on_quota && !tenant.usage.is_within_quota(&tenant.quota) {
             tenant.status = TenantStatus::Suspended;
         }
-        
+
         Ok(())
     }
-    
+
     /// Get usage statistics for a tenant.
     pub async fn get_usage(&self, tenant_id: &TenantId) -> TenantResult<ResourceUsage> {
         let tenants = self.tenants.read().await;
         let tenant = tenants
             .get(tenant_id)
             .ok_or_else(|| TenantError::NotFound(tenant_id.clone()))?;
-        
+
         Ok(tenant.usage.clone())
     }
-    
+
     /// List all tenants (admin only).
     pub async fn list_tenants(&self) -> Vec<Tenant> {
         let tenants = self.tenants.read().await;
@@ -584,78 +600,75 @@ impl TenantManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[tokio::test]
     async fn test_create_tenant() {
         let manager = TenantManager::new(TenantConfig::default());
-        
+
         let tenant = manager
             .create_tenant(TenantId::new("test-1"), "Test Tenant", None)
             .await
             .unwrap();
-        
+
         assert_eq!(tenant.id.as_str(), "test-1");
         assert_eq!(tenant.name, "Test Tenant");
         assert_eq!(tenant.tier, TenantTier::Free);
         assert_eq!(tenant.status, TenantStatus::Active);
     }
-    
+
     #[tokio::test]
     async fn test_duplicate_tenant() {
         let manager = TenantManager::new(TenantConfig::default());
-        
+
         manager
             .create_tenant(TenantId::new("test-1"), "Test Tenant", None)
             .await
             .unwrap();
-        
+
         let result = manager
             .create_tenant(TenantId::new("test-1"), "Duplicate", None)
             .await;
-        
+
         assert!(matches!(result, Err(TenantError::AlreadyExists(_))));
     }
-    
+
     #[tokio::test]
     async fn test_namespace_creation() {
         let manager = TenantManager::new(TenantConfig::default());
-        
+
         let tenant_id = TenantId::new("test-1");
         manager
             .create_tenant(tenant_id.clone(), "Test Tenant", None)
             .await
             .unwrap();
-        
-        let ns = manager
-            .create_namespace(&tenant_id, "prod")
-            .await
-            .unwrap();
-        
+
+        let ns = manager.create_namespace(&tenant_id, "prod").await.unwrap();
+
         assert_eq!(ns.name, "prod");
         assert_eq!(ns.fqn(), "test-1/prod");
     }
-    
+
     #[tokio::test]
     async fn test_tier_quotas() {
         let free_quota = TenantTier::Free.default_quota();
         let enterprise_quota = TenantTier::Enterprise.default_quota();
-        
+
         assert!(free_quota.max_rps < enterprise_quota.max_rps);
         assert!(free_quota.max_storage_bytes < enterprise_quota.max_storage_bytes);
     }
-    
+
     #[tokio::test]
     async fn test_usage_tracking() {
         let manager = TenantManager::new(TenantConfig::default());
-        
+
         let tenant_id = TenantId::new("test-1");
         manager
             .create_tenant(tenant_id.clone(), "Test", None)
             .await
             .unwrap();
-        
+
         manager.record_usage(&tenant_id, 1000, 50).await.unwrap();
-        
+
         let usage = manager.get_usage(&tenant_id).await.unwrap();
         assert_eq!(usage.storage_bytes, 1000);
         assert_eq!(usage.events_today, 50);

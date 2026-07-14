@@ -28,13 +28,13 @@ pub fn serialize<T: serde::Serialize>(
             serde_json::to_vec(value).map_err(|e| ProtoError::Serialization(e.to_string()))
         }
         #[cfg(feature = "toml")]
-        SerializationFormat::Toml => {
-            toml::to_vec(value).map_err(|e| ProtoError::Serialization(e.to_string()))
-        }
+        SerializationFormat::Toml => toml::to_string(value)
+            .map(String::into_bytes)
+            .map_err(|e| ProtoError::Serialization(e.to_string())),
         #[cfg(not(feature = "toml"))]
-        SerializationFormat::Toml => {
-            Err(ProtoError::Serialization("TOML support not enabled".to_string()))
-        }
+        SerializationFormat::Toml => Err(ProtoError::Serialization(
+            "TOML support not enabled".to_string(),
+        )),
     }
 }
 
@@ -53,12 +53,14 @@ pub fn deserialize<T: for<'de> serde::Deserialize<'de>>(
         }
         #[cfg(feature = "toml")]
         SerializationFormat::Toml => {
-            toml::from_slice(bytes).map_err(|e| ProtoError::Deserialization(e.to_string()))
+            let s = std::str::from_utf8(bytes)
+                .map_err(|e| ProtoError::Deserialization(e.to_string()))?;
+            toml::from_str(s).map_err(|e| ProtoError::Deserialization(e.to_string()))
         }
         #[cfg(not(feature = "toml"))]
-        SerializationFormat::Toml => {
-            Err(ProtoError::Deserialization("TOML support not enabled".to_string()))
-        }
+        SerializationFormat::Toml => Err(ProtoError::Deserialization(
+            "TOML support not enabled".to_string(),
+        )),
     }
 }
 
@@ -113,4 +115,3 @@ pub trait MultiFormatDeserialize: for<'de> serde::Deserialize<'de> {
 }
 
 impl<T: for<'de> serde::Deserialize<'de>> MultiFormatDeserialize for T {}
-

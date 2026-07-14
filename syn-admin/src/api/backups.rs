@@ -1,15 +1,15 @@
 //! Backup management API.
 
-use std::sync::Arc;
 use axum::{
     extract::{Path, State},
     Json,
 };
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 use syn_core::enterprise::BackupType;
 
-use crate::error::AdminResult;
+use crate::error::{AdminError, AdminResult};
 use crate::state::AppState;
 
 /// Backup response.
@@ -54,13 +54,12 @@ pub struct RestoreRequest {
 }
 
 /// List all backups.
-pub async fn list_backups(
-    State(state): State<Arc<AppState>>,
-) -> Json<Vec<BackupResponse>> {
+pub async fn list_backups(State(state): State<Arc<AppState>>) -> Json<Vec<BackupResponse>> {
     let backups = state.enterprise.backup.list_recovery_points().await;
-    
-    let responses: Vec<BackupResponse> = backups.into_iter().map(|b| {
-        BackupResponse {
+
+    let responses: Vec<BackupResponse> = backups
+        .into_iter()
+        .map(|b| BackupResponse {
             id: b.id.clone(),
             backup_type: format!("{:?}", b.backup_type),
             status: format!("{:?}", b.status),
@@ -71,9 +70,9 @@ pub async fn list_backups(
             completed_at: b.completed_at.map(format_time),
             parent_id: b.parent_id.clone(),
             checksum: b.checksum.clone(),
-        }
-    }).collect();
-    
+        })
+        .collect();
+
     Json(responses)
 }
 
@@ -83,7 +82,7 @@ pub async fn get_backup(
     Path(id): Path<String>,
 ) -> AdminResult<Json<BackupResponse>> {
     let backup = state.enterprise.backup.get_recovery_point(&id).await?;
-    
+
     Ok(Json(BackupResponse {
         id: backup.id.clone(),
         backup_type: format!("{:?}", backup.backup_type),
@@ -109,11 +108,13 @@ pub async fn create_backup(
         Some("Snapshot") => BackupType::Snapshot,
         _ => BackupType::Incremental,
     };
-    
-    let backup = state.enterprise.backup
+
+    let backup = state
+        .enterprise
+        .backup
         .start_backup(backup_type, req.tenant_id)
         .await?;
-    
+
     Ok(Json(BackupResponse {
         id: backup.id.clone(),
         backup_type: format!("{:?}", backup.backup_type),
@@ -134,7 +135,7 @@ pub async fn delete_backup(
     Path(id): Path<String>,
 ) -> AdminResult<Json<serde_json::Value>> {
     state.enterprise.backup.delete_recovery_point(&id).await?;
-    
+
     Ok(Json(serde_json::json!({
         "status": "deleted",
         "id": id,
@@ -142,29 +143,38 @@ pub async fn delete_backup(
 }
 
 /// Restore from a backup.
+///
+/// `syn_core::enterprise::backup::BackupManager` has no method that actually
+/// performs (or queues) a restore -- it can create, complete, list, and
+/// delete recovery points, and `find_recovery_chain` can compute which
+/// recovery points *would* be needed for a point-in-time restore, but
+/// nothing in its public API applies a backup back onto the running system.
+/// Returning a fabricated `"restore_initiated"` success would mislead
+/// callers into thinking data recovery is underway when nothing happens.
+/// Instead, we verify the backup exists (a real check) and then honestly
+/// report that restore execution is not implemented in this build.
 pub async fn restore_backup(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     Json(_req): Json<RestoreRequest>,
 ) -> AdminResult<Json<serde_json::Value>> {
-    // Verify the backup exists
-    let backup = state.enterprise.backup.get_recovery_point(&id).await?;
-    
-    // In a real implementation, this would trigger the restore process
-    // For now, we return a success response
-    Ok(Json(serde_json::json!({
-        "status": "restore_initiated",
-        "backup_id": id,
-        "backup_type": format!("{:?}", backup.backup_type),
-        "message": "Restore process has been initiated. Monitor progress via /api/backups/{id}",
-    })))
+    // Verify the backup exists before reporting anything about it.
+    state.enterprise.backup.get_recovery_point(&id).await?;
+
+    Err(AdminError::NotImplemented(format!(
+        "Restore execution is not implemented in this build: \
+         syn_core::enterprise::backup::BackupManager has no method to apply a backup back \
+         onto the running system (only create/list/delete recovery points are supported). \
+         Backup '{}' exists and was verified, but no restore was queued or performed.",
+        id
+    )))
 }
 
 fn format_bytes(bytes: u64) -> String {
     const KB: u64 = 1024;
     const MB: u64 = KB * 1024;
     const GB: u64 = MB * 1024;
-    
+
     if bytes >= GB {
         format!("{:.2} GB", bytes as f64 / GB as f64)
     } else if bytes >= MB {
@@ -181,8 +191,7 @@ fn format_time(time: std::time::SystemTime) -> String {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default();
     let secs = duration.as_secs();
-    
-    let datetime = chrono::DateTime::from_timestamp(secs as i64, 0)
-        .unwrap_or_default();
+
+    let datetime = chrono::DateTime::from_timestamp(secs as i64, 0).unwrap_or_default();
     datetime.format("%Y-%m-%dT%H:%M:%SZ").to_string()
 }

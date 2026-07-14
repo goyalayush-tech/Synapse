@@ -230,8 +230,7 @@ mod tests {
         use rkyv::ser::Serializer;
         use rkyv::Deserialize;
 
-        let header = PacketHeader::new(12345, 1024, PacketFlags::COMPRESSED)
-            .with_sequence(42);
+        let header = PacketHeader::new(12345, 1024, PacketFlags::COMPRESSED).with_sequence(42);
 
         // Serialize
         let mut serializer = AllocSerializer::<256>::default();
@@ -239,15 +238,15 @@ mod tests {
         let bytes = serializer.into_serializer().into_inner();
 
         // Zero-copy access
-        let archived = rkyv::check_archived_root::<PacketHeader>(&bytes)
-            .expect("validation");
-        
+        let archived = rkyv::check_archived_root::<PacketHeader>(&bytes).expect("validation");
+
         assert_eq!(archived.session_id, 12345);
         assert_eq!(archived.payload_len, 1024);
         assert_eq!(archived.sequence, 42);
 
         // Full deserialization (if needed)
-        let deserialized: PacketHeader = archived.deserialize(&mut rkyv::Infallible)
+        let deserialized: PacketHeader = archived
+            .deserialize(&mut rkyv::Infallible)
             .expect("deserialize");
         assert_eq!(header, deserialized);
     }

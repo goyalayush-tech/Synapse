@@ -81,26 +81,32 @@ pub mod cedar;
 #[cfg(feature = "hot-reload")]
 pub mod hot_reload;
 
-pub use engine::{PolicyEngine, PolicyEngineError, PolicyEngineResult, PolicyConfig};
+pub use engine::{PolicyConfig, PolicyEngine, PolicyEngineError, PolicyEngineResult};
 pub use policy::{Policy, PolicyId, PolicyMetadata};
-pub use verdict::{Verdict, VerdictReason, TransformAction};
+pub use verdict::{TransformAction, Verdict, VerdictReason};
 
 // Re-export wasm_host types when feature is enabled
+//
+// `WasmHost` does NOT actually execute WASM policies (see
+// `WasmHost::evaluate`, which always fails closed). `ComponentModelHost` is
+// the real evaluation path: it actually instantiates and runs the loaded
+// WASM component via wasmtime. Callers who need real policy enforcement
+// should use `ComponentModelHost`, not `WasmHost`.
 #[cfg(feature = "wasm-full")]
-pub use wasm_host::{WasmHost, WasmHostConfig, WasmHostError, PolicyVerdict};
+pub use wasm_host::{ComponentModelHost, PolicyVerdict, WasmHost, WasmHostConfig, WasmHostError};
 
 // Re-export cedar types when feature is enabled
 #[cfg(feature = "cedar")]
 pub use cedar::{
-    CedarEngine, CedarConfig, CedarPolicy, CedarError, CedarStats,
-    create_default_policy, SYNAPSE_CEDAR_SCHEMA, SYNAPSE_DEFAULT_POLICIES,
+    create_default_policy, CedarConfig, CedarEngine, CedarError, CedarPolicy, CedarStats,
+    SYNAPSE_CEDAR_SCHEMA, SYNAPSE_DEFAULT_POLICIES,
 };
 
 // Re-export hot-reload types when feature is enabled
 #[cfg(feature = "hot-reload")]
 pub use hot_reload::{
-    PolicyWatcher, PolicyWatcherBuilder, HotReloadConfig, HotReloadError,
-    HotReloadResult, HotReloadStats,
+    HotReloadConfig, HotReloadError, HotReloadResult, HotReloadStats, PolicyWatcher,
+    PolicyWatcherBuilder,
 };
 
 // Re-export Cedar + hot-reload integration

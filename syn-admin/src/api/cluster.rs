@@ -1,8 +1,8 @@
 //! Cluster status API.
 
-use std::sync::Arc;
 use axum::{extract::State, Json};
 use serde::Serialize;
+use std::sync::Arc;
 
 use crate::state::{AppState, NodeStatus};
 
@@ -17,6 +17,16 @@ pub struct ClusterStatus {
     pub healthy_nodes: usize,
     /// Node details
     pub nodes: Vec<NodeInfo>,
+    /// Whether `nodes` reflects live cluster heartbeat/discovery data.
+    ///
+    /// `AppState::nodes` (see `syn-admin/src/state.rs`) is currently seeded
+    /// once at startup with static, hardcoded node entries -- there is no
+    /// real heartbeat or discovery mechanism updating it. This is always
+    /// `false` until that is implemented, so API consumers are not misled
+    /// into treating this as live telemetry.
+    pub is_live: bool,
+    /// Human-readable description of where `nodes` comes from.
+    pub data_source: &'static str,
 }
 
 /// Node info for API.
@@ -50,35 +60,37 @@ pub struct MetricsResponse {
 }
 
 /// Get cluster status.
-pub async fn get_status(
-    State(state): State<Arc<AppState>>,
-) -> Json<ClusterStatus> {
+pub async fn get_status(State(state): State<Arc<AppState>>) -> Json<ClusterStatus> {
     let nodes = state.nodes.read().await;
-    let healthy = nodes.iter().filter(|n| n.status == NodeStatus::Healthy).count();
-    
-    let node_info: Vec<NodeInfo> = nodes.iter().map(|n| {
-        NodeInfo {
+    let healthy = nodes
+        .iter()
+        .filter(|n| n.status == NodeStatus::Healthy)
+        .count();
+
+    let node_info: Vec<NodeInfo> = nodes
+        .iter()
+        .map(|n| NodeInfo {
             id: n.id.clone(),
             address: n.address.clone(),
             status: format!("{:?}", n.status),
             last_heartbeat: format_time(n.last_heartbeat),
-        }
-    }).collect();
-    
+        })
+        .collect();
+
     Json(ClusterStatus {
         name: "synapse-cluster".to_string(),
         total_nodes: nodes.len(),
         healthy_nodes: healthy,
         nodes: node_info,
+        is_live: false,
+        data_source: "mock",
     })
 }
 
 /// Get cluster metrics.
-pub async fn get_metrics(
-    State(state): State<Arc<AppState>>,
-) -> Json<MetricsResponse> {
+pub async fn get_metrics(State(state): State<Arc<AppState>>) -> Json<MetricsResponse> {
     let metrics = state.metrics.read().await;
-    
+
     Json(MetricsResponse {
         events_processed: metrics.events_processed,
         events_per_second: metrics.events_per_second,
@@ -94,8 +106,7 @@ fn format_time(time: std::time::SystemTime) -> String {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default();
     let secs = duration.as_secs();
-    
-    let datetime = chrono::DateTime::from_timestamp(secs as i64, 0)
-        .unwrap_or_default();
+
+    let datetime = chrono::DateTime::from_timestamp(secs as i64, 0).unwrap_or_default();
     datetime.format("%Y-%m-%dT%H:%M:%SZ").to_string()
 }

@@ -21,6 +21,10 @@ pub enum TlsError {
     #[error("Failed to create TLS configuration: {0}")]
     ConfigCreation(String),
 
+    /// Real TLS/mTLS wiring is not implemented by this crate.
+    #[error("TLS/mTLS is not implemented in syn-identity: {0}")]
+    NotImplemented(String),
+
     /// SPIFFE error.
     #[error("SPIFFE error: {0}")]
     Spiffe(#[from] SpiffeError),
@@ -28,8 +32,19 @@ pub enum TlsError {
 
 /// TLS configuration for client or server.
 ///
-/// This is a simplified abstraction. In production, you would use
-/// rustls or native-tls to create actual TLS configurations.
+/// # This does not build real TLS
+///
+/// This struct is a **placeholder data holder only**. It stores a
+/// [`SpiffeIdentity`] and an `is_client` flag, but it never builds a real
+/// `rustls::ClientConfig`/`ServerConfig`, never parses/validates the
+/// certificate chain, and never installs a certificate verifier. It cannot
+/// be used to actually establish a TLS or mTLS connection.
+///
+/// Because a struct named `TlsConfig` could easily be mistaken for a working
+/// TLS configuration, every public constructor (`new`, `client`, `server`)
+/// and the [`ToTlsConfig`] extension trait always return
+/// `Err(TlsError::NotImplemented)`. Real TLS/mTLS wiring (e.g. via `rustls`)
+/// is out of scope for this crate today.
 #[cfg(feature = "spiffe")]
 #[derive(Debug, Clone)]
 pub struct TlsConfig {
@@ -41,16 +56,16 @@ pub struct TlsConfig {
 
 #[cfg(feature = "spiffe")]
 impl TlsConfig {
-    /// Creates a new TLS configuration from a SPIFFE identity.
-    ///
-    /// # Arguments
-    ///
-    /// * `identity` - SPIFFE identity to use for TLS.
-    /// * `is_client` - Whether this is a client configuration.
+    /// Attempts to create a new TLS configuration from a SPIFFE identity.
     ///
     /// # Errors
     ///
-    /// Returns an error if the TLS configuration cannot be created.
+    /// **Always returns an error.** Real TLS/mTLS configuration (a
+    /// `rustls::ClientConfig`/`ServerConfig` backed by the SPIFFE identity's
+    /// certificate and a real certificate verifier) is not implemented in
+    /// this crate. This function exists only as a documented placeholder so
+    /// callers get an explicit, unmistakable failure instead of a
+    /// TLS-shaped struct that cannot actually perform TLS.
     pub fn new(identity: SpiffeIdentity, is_client: bool) -> TlsResult<Self> {
         // Validate that identity is not expired
         if identity.is_expired() {
@@ -59,26 +74,31 @@ impl TlsConfig {
             ));
         }
 
-        Ok(Self {
-            identity,
-            is_client,
-        })
+        let _ = is_client; // reserved for a real implementation
+
+        Err(TlsError::NotImplemented(
+            "TlsConfig does not build a real TLS/mTLS configuration (no rustls::ClientConfig \
+             / ServerConfig is constructed and no certificate verifier is installed). Wire up \
+             rustls (or another TLS library) directly for real TLS/mTLS; this crate does not \
+             yet do so."
+                .to_string(),
+        ))
     }
 
-    /// Creates a client TLS configuration.
+    /// Attempts to create a client TLS configuration.
     ///
     /// # Errors
     ///
-    /// Returns an error if the configuration cannot be created.
+    /// Always returns `Err(TlsError::NotImplemented)` — see [`TlsConfig::new`].
     pub fn client(identity: SpiffeIdentity) -> TlsResult<Self> {
         Self::new(identity, true)
     }
 
-    /// Creates a server TLS configuration.
+    /// Attempts to create a server TLS configuration.
     ///
     /// # Errors
     ///
-    /// Returns an error if the configuration cannot be created.
+    /// Always returns `Err(TlsError::NotImplemented)` — see [`TlsConfig::new`].
     pub fn server(identity: SpiffeIdentity) -> TlsResult<Self> {
         Self::new(identity, false)
     }
@@ -96,11 +116,14 @@ pub type TlsResult<T> = Result<T, TlsError>;
 /// Extension trait for converting SPIFFE identities to TLS configurations.
 #[cfg(feature = "spiffe")]
 pub trait ToTlsConfig {
-    /// Converts the identity to a TLS configuration.
+    /// Attempts to convert the identity to a TLS configuration.
     ///
     /// # Errors
     ///
-    /// Returns an error if the conversion fails.
+    /// **Always returns `Err(TlsError::NotImplemented)`.** Real TLS/mTLS
+    /// wiring is not implemented in this crate — see [`TlsConfig`] for
+    /// details. Do not rely on this method for real security in any
+    /// environment.
     fn to_tls_config(&self, is_client: bool) -> TlsResult<TlsConfig>;
 }
 
@@ -128,11 +151,20 @@ mod tests {
     }
 
     #[test]
-    fn tls_config_creation() {
+    fn tls_config_creation_is_not_implemented() {
+        // TlsConfig does not build real TLS/mTLS material, so construction
+        // must always fail explicitly rather than silently succeed with a
+        // TLS-shaped-but-inert struct.
         let identity = create_test_identity();
-        let config = TlsConfig::client(identity).unwrap();
-        assert!(config.is_client);
-        assert_eq!(config.spiffe_id(), "spiffe://example.org/workload/test");
+        let result = TlsConfig::client(identity);
+        assert!(matches!(result, Err(TlsError::NotImplemented(_))));
+    }
+
+    #[test]
+    fn to_tls_config_is_not_implemented() {
+        let identity = create_test_identity();
+        let result = identity.to_tls_config(true);
+        assert!(matches!(result, Err(TlsError::NotImplemented(_))));
     }
 
     #[test]
@@ -145,7 +177,10 @@ mod tests {
             SystemTime::now() - Duration::from_secs(1), // Expired
         );
 
-        assert!(TlsConfig::client(identity).is_err());
+        // Still an error (expiry is checked before the NotImplemented gate).
+        assert!(matches!(
+            TlsConfig::client(identity),
+            Err(TlsError::ConfigCreation(_))
+        ));
     }
 }
-

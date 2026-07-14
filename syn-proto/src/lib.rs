@@ -46,13 +46,13 @@ pub mod mcp;
 #[cfg(feature = "a2a")]
 pub mod a2a;
 
-pub mod serde;
 pub mod rkyv;
+pub mod serde;
 
 // Re-export primary types
 pub use control::{ControlCommand, ControlResponse, MetricsPayload, ProxyStatus};
-pub use data::{PacketFlags, PacketHeader, IntentEvent};
-pub use error::{ProtoError, ProtoResult};
+pub use data::{IntentEvent, PacketFlags, PacketHeader};
+pub use error::{ProtoError, ProtoResult, MAX_MESSAGE_SIZE};
 
 #[cfg(feature = "toon")]
 pub use toon::{ToonError, ToonParser, ToonResult, ToonSchema, ToonSerializer};

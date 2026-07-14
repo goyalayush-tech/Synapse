@@ -47,7 +47,14 @@
 //!
 //! let client = SpiffeClient::new("spire-server:8081");
 //! let identity = client.fetch_svid("spiffe://example.org/workload/agent-1").await?;
-//! let tls_config = identity.to_tls_config(true)?; // true = client mode
+//!
+//! // NOTE: `to_tls_config` currently ALWAYS returns
+//! // `Err(TlsError::NotImplemented)`. This crate does not yet build a real
+//! // rustls::ClientConfig/ServerConfig or install a certificate verifier,
+//! // so it cannot be used to establish real TLS/mTLS. Wire up rustls (or
+//! // another TLS library) directly for real TLS.
+//! let tls_config = identity.to_tls_config(true); // true = client mode
+//! assert!(tls_config.is_err());
 //! # Ok(())
 //! # }
 //! ```
@@ -63,19 +70,26 @@ pub mod ebpf;
 pub mod provider;
 
 #[cfg(feature = "spiffe")]
-pub use spiffe::{SpiffeClient, SpiffeEndpoint, SpiffeError, SpiffeIdentity, SpiffeResult, SpiffeBundle, SpiffeId, ParsedSpiffeId};
-#[cfg(feature = "spiffe")]
-pub use tls::{TlsConfig, TlsError};
+pub use spiffe::{
+    ParsedSpiffeId, SpiffeBundle, SpiffeClient, SpiffeEndpoint, SpiffeError, SpiffeId,
+    SpiffeIdentity, SpiffeResult,
+};
 #[cfg(feature = "spiffe")]
 pub use tls::ToTlsConfig;
+#[cfg(feature = "spiffe")]
+pub use tls::{TlsConfig, TlsError};
 
-pub use attestation::{AttestationError, AttestationProvider, AttestationResult, ProcessAttributes};
-pub use ebpf::{Allowlist, AllowlistEntry, BinaryHash, AttestationVerifier, ProcessInfo, VerificationResult, VerificationDenial};
-pub use ebpf::{EbpfAttestationEngine, EbpfConfig, EbpfError, ConnectionEvent, EngineStats};
+pub use attestation::{
+    AttestationError, AttestationProvider, AttestationResult, ProcessAttributes,
+};
+pub use ebpf::{
+    Allowlist, AllowlistEntry, AttestationVerifier, BinaryHash, ProcessInfo, VerificationDenial,
+    VerificationResult,
+};
+pub use ebpf::{ConnectionEvent, EbpfAttestationEngine, EbpfConfig, EbpfError, EngineStats};
 
 // Identity Provider trait - the core abstraction for kernel-level attestation
 pub use provider::{
-    IdentityProvider, IdentityProviderConfig, IdentityProviderError, IdentityProviderResult,
-    AttestationEvent, AttestationEventType, ProviderStats, get_identity_provider,
+    get_identity_provider, AttestationEvent, AttestationEventType, IdentityProvider,
+    IdentityProviderConfig, IdentityProviderError, IdentityProviderResult, ProviderStats,
 };
-

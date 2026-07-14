@@ -70,6 +70,53 @@ jobs:
           cargo install cargo-deny --locked
           cargo deny check
 
+  feature-check:
+    name: Feature check (all-features per crate)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo registry
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Check syn-core (all features)
+        run: cargo check -p syn-core --all-features
+
+      - name: Check syn-proto (all features)
+        run: cargo check -p syn-proto --all-features
+
+      - name: Check syn-proxy (all features)
+        run: cargo check -p syn-proxy --all-features
+
+      - name: Check syn-cli (all features)
+        run: cargo check -p syn-cli --all-features
+
+      - name: Check syn-identity (all features)
+        run: cargo check -p syn-identity --all-features
+
+      - name: Check syn-network (all features)
+        run: cargo check -p syn-network --all-features
+
+      - name: Check syn-memory (all features)
+        run: cargo check -p syn-memory --all-features
+
+      - name: Check syn-policy (all features)
+        run: cargo check -p syn-policy --all-features
+
+      - name: Check syn-admin (all features)
+        run: cargo check -p syn-admin --all-features
+
   build:
     name: Build on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}

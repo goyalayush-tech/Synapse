@@ -1,0 +1,64 @@
+# cargo-deny configuration for Synapse.
+#
+# This is a minimal, standard baseline intended to give `cargo deny check`
+# (run in .github/workflows/ci.yml's `security` job) something real to check
+# against. It is deliberately not maximally strict — see comments below.
+#
+# Docs: https://embarkstudios.github.io/cargo-deny/
+
+[graph]
+targets = []
+
+# ---------------------------------------------------------------------------
+# Advisories: known-vulnerable / unmaintained / yanked crates (via RustSec).
+# ---------------------------------------------------------------------------
+[advisories]
+db-urls = ["https://github.com/rustsec/advisory-db"]
+# Fail CI on known security vulnerabilities.
+vulnerability = "deny"
+# Don't fail CI on unmaintained or yanked crates yet, just surface them.
+unmaintained = "warn"
+yanked = "warn"
+notice = "warn"
+ignore = []
+
+# ---------------------------------------------------------------------------
+# Licenses: allow the common permissive licenses used across the Rust
+# ecosystem. Synapse itself is MIT OR Apache-2.0 (see workspace Cargo.toml).
+# ---------------------------------------------------------------------------
+[licenses]
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-DFS-2016",
+    "Unicode-3.0",
+    "Zlib",
+    "CC0-1.0",
+    "MPL-2.0",
+]
+confidence-threshold = 0.8
+
+# ---------------------------------------------------------------------------
+# Bans: keep this permissive. The dependency tree currently pulls in
+# multiple versions of some crates (e.g. rustls, via different transitive
+# paths) - that's a pre-existing, known situation and shouldn't fail CI.
+# ---------------------------------------------------------------------------
+[bans]
+multiple-versions = "warn"
+wildcards = "warn"
+deny = []
+skip = []
+skip-tree = []
+
+# ---------------------------------------------------------------------------
+# Sources: only allow crates.io as a registry source.
+# ---------------------------------------------------------------------------
+[sources]
+unknown-registry = "deny"
+unknown-git = "warn"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

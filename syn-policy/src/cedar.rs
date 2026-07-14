@@ -53,19 +53,18 @@
 //! };
 //! ```
 
+use async_trait::async_trait;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::str::FromStr;
 use std::sync::Arc;
-use async_trait::async_trait;
 use thiserror::Error;
 use tracing::{debug, info, instrument, warn};
 
 // Cedar policy imports
 use cedar_policy::{
-    Authorizer, Context, Entities, EntityId, EntityTypeName, EntityUid,
-    PolicySet, Request, Response, Decision, Schema, Validator,
-    ValidationMode, PolicyId as CedarPolicyId,
+    Authorizer, Context, Decision, Entities, EntityId, EntityTypeName, EntityUid,
+    PolicyId as CedarPolicyId, PolicySet, Request, Response, Schema, ValidationMode, Validator,
 };
 
 use crate::policy::{Policy, PolicyContext, PolicyError, PolicyMetadata, PolicyResult};
@@ -77,23 +76,23 @@ pub enum CedarError {
     /// Failed to parse Cedar policies
     #[error("Failed to parse Cedar policies: {0}")]
     ParseError(String),
-    
+
     /// Failed to validate policies against schema
     #[error("Policy validation failed: {0}")]
     ValidationError(String),
-    
+
     /// Entity creation failed
     #[error("Failed to create entity: {0}")]
     EntityError(String),
-    
+
     /// Authorization request failed
     #[error("Authorization request failed: {0}")]
     AuthorizationError(String),
-    
+
     /// Schema loading failed
     #[error("Failed to load schema: {0}")]
     SchemaError(String),
-    
+
     /// IO error
     #[error("IO error: {0}")]
     IoError(#[from] std::io::Error),
@@ -137,19 +136,19 @@ impl CedarConfig {
     pub fn new() -> Self {
         Self::default()
     }
-    
+
     /// Set the schema path
     pub fn with_schema(mut self, path: impl Into<String>) -> Self {
         self.schema_path = Some(path.into());
         self
     }
-    
+
     /// Add a policy path
     pub fn with_policy(mut self, path: impl Into<String>) -> Self {
         self.policy_paths.push(path.into());
         self
     }
-    
+
     /// Set the namespace
     pub fn with_namespace(mut self, namespace: impl Into<String>) -> Self {
         self.namespace = namespace.into();
@@ -181,17 +180,17 @@ impl CedarEngine {
     #[instrument(skip(config))]
     pub fn new(config: CedarConfig) -> Result<Self, CedarError> {
         info!("Creating Cedar policy engine");
-        
+
         let authorizer = Authorizer::new();
         let policy_set = PolicySet::new();
         let entities = Entities::empty();
-        
+
         let metadata = PolicyMetadata::new("cedar-engine", "Cedar Authorization Engine")
             .with_description("Fine-grained authorization using Cedar policies")
             .with_tag("authorization")
             .with_tag("cedar")
             .with_tag("zero-trust");
-        
+
         Ok(Self {
             authorizer,
             policy_set,
@@ -201,60 +200,70 @@ impl CedarEngine {
             metadata,
         })
     }
-    
+
     /// Load policies from a Cedar policy string
+    ///
+    /// Parses and validates into a local `PolicySet` first, and only
+    /// assigns to `self.policy_set` once validation has succeeded. This
+    /// gives an atomic swap: if parsing succeeds but schema validation
+    /// fails, `self.policy_set` is left untouched (still holding the
+    /// previous, already-validated policy set) rather than being replaced
+    /// with an unvalidated one that an `Err` return would otherwise imply
+    /// was rejected.
     #[instrument(skip(self, policy_src))]
     pub fn load_policies(&mut self, policy_src: &str) -> Result<(), CedarError> {
         debug!("Loading Cedar policies from string");
-        
-        self.policy_set = PolicySet::from_str(policy_src)
+
+        let new_policy_set = PolicySet::from_str(policy_src)
             .map_err(|e| CedarError::ParseError(format_parse_errors(&e)))?;
-        
+
         // Validate against schema if available
         if self.config.validate_policies {
             if let Some(ref schema) = self.schema {
                 let validator = Validator::new(schema.clone());
-                let result = validator.validate(&self.policy_set, ValidationMode::default());
-                
+                let result = validator.validate(&new_policy_set, ValidationMode::default());
+
                 if !result.validation_passed() {
-                    let errors: Vec<String> = result
-                        .validation_errors()
-                        .map(|e| e.to_string())
-                        .collect();
+                    let errors: Vec<String> =
+                        result.validation_errors().map(|e| e.to_string()).collect();
                     return Err(CedarError::ValidationError(errors.join("; ")));
                 }
             }
         }
-        
+
+        // Validation succeeded (or was skipped): atomically swap in the new
+        // policy set.
+        self.policy_set = new_policy_set;
+
         info!(
             policy_count = self.policy_set.policies().count(),
             "Loaded Cedar policies"
         );
-        
+
         Ok(())
     }
-    
+
     /// Load policies from a file
     #[instrument(skip(self))]
     pub fn load_policies_from_file(&mut self, path: &Path) -> Result<(), CedarError> {
         let content = std::fs::read_to_string(path)?;
         self.load_policies(&content)
     }
-    
+
     /// Load schema from a Cedar schema string
     #[instrument(skip(self, schema_src))]
     pub fn load_schema(&mut self, schema_src: &str) -> Result<(), CedarError> {
         debug!("Loading Cedar schema from string");
-        
+
         let (schema, _warnings) = Schema::from_cedarschema_str(schema_src)
             .map_err(|e| CedarError::SchemaError(e.to_string()))?;
-        
+
         self.schema = Some(schema);
         info!("Loaded Cedar schema");
-        
+
         Ok(())
     }
-    
+
     /// Add an entity to the entity store
     #[instrument(skip(self))]
     pub fn add_entity(
@@ -264,25 +273,26 @@ impl CedarEngine {
         attributes: HashMap<String, cedar_policy::RestrictedExpression>,
         parents: HashSet<EntityUid>,
     ) -> Result<(), CedarError> {
-        let type_name = EntityTypeName::from_str(&format!("{}::{}", self.config.namespace, entity_type))
-            .map_err(|e| CedarError::EntityError(e.to_string()))?;
-        
+        let type_name =
+            EntityTypeName::from_str(&format!("{}::{}", self.config.namespace, entity_type))
+                .map_err(|e| CedarError::EntityError(e.to_string()))?;
+
         // EntityId::new is the Cedar 4.x API
         let eid = EntityId::new(entity_id);
-        
+
         let uid = EntityUid::from_type_name_and_id(type_name, eid);
-        
+
         let entity = cedar_policy::Entity::new(uid, attributes, parents)
             .map_err(|e| CedarError::EntityError(e.to_string()))?;
-        
+
         // Add to entities - this is a simplification; in practice you'd rebuild
         let mut entities = self.entities.write();
         *entities = Entities::from_entities([entity], self.schema.as_ref())
             .map_err(|e| CedarError::EntityError(e.to_string()))?;
-        
+
         Ok(())
     }
-    
+
     /// Create an authorization request
     #[instrument(skip(self))]
     pub fn create_request(
@@ -297,10 +307,10 @@ impl CedarEngine {
         let principal = create_entity_uid(&self.config.namespace, principal_type, principal_id)?;
         let action = create_entity_uid(&self.config.namespace, "Action", action_name)?;
         let resource = create_entity_uid(&self.config.namespace, resource_type, resource_id)?;
-        
+
         let cedar_context = Context::from_pairs(context)
             .map_err(|e| CedarError::AuthorizationError(e.to_string()))?;
-        
+
         Request::new(
             principal,
             action,
@@ -310,20 +320,21 @@ impl CedarEngine {
         )
         .map_err(|e| CedarError::AuthorizationError(e.to_string()))
     }
-    
+
     /// Check if a request is authorized
     #[instrument(skip(self, request))]
     pub fn is_authorized(&self, request: &Request) -> Response {
         let entities = self.entities.read();
-        self.authorizer.is_authorized(request, &self.policy_set, &entities)
+        self.authorizer
+            .is_authorized(request, &self.policy_set, &entities)
     }
-    
+
     /// Evaluate authorization for a Synapse policy context
     #[instrument(skip(self, ctx))]
     pub fn evaluate_context(&self, ctx: &PolicyContext) -> Result<Verdict, CedarError> {
         // Extract principal from context
         let principal_id = &ctx.source;
-        
+
         // Build the request
         let request = self.create_request(
             "Agent",
@@ -333,10 +344,10 @@ impl CedarEngine {
             &format!("event-{}", ctx.event_id),
             HashMap::new(),
         )?;
-        
+
         // Evaluate
         let response = self.is_authorized(&request);
-        
+
         match response.decision() {
             Decision::Allow => {
                 debug!(
@@ -352,25 +363,25 @@ impl CedarEngine {
                     .reason()
                     .map(|id| id.to_string())
                     .collect();
-                
+
                 let reason = if reasons.is_empty() {
                     "Denied by policy".to_string()
                 } else {
                     format!("Denied by policies: {}", reasons.join(", "))
                 };
-                
+
                 debug!(
                     principal = %ctx.source,
                     action = %ctx.action,
                     reason = %reason,
                     "Authorization denied"
                 );
-                
+
                 Ok(Verdict::deny(reason))
             }
         }
     }
-    
+
     /// Get statistics about loaded policies
     pub fn stats(&self) -> CedarStats {
         CedarStats {
@@ -408,37 +419,37 @@ impl CedarPolicy {
     pub fn new() -> Result<Self, CedarError> {
         Self::with_config(CedarConfig::default())
     }
-    
+
     /// Create a new Cedar policy with the given configuration
     pub fn with_config(config: CedarConfig) -> Result<Self, CedarError> {
         let engine = CedarEngine::new(config)?;
-        
+
         let metadata = PolicyMetadata::new("cedar", "Cedar Authorization Policy")
             .with_description("Fine-grained authorization using Cedar policies")
             .with_tag("authorization")
             .with_tag("cedar");
-        
+
         Ok(Self {
             engine: Arc::new(parking_lot::RwLock::new(engine)),
             metadata,
         })
     }
-    
+
     /// Load policies from string
     pub fn load_policies(&self, policy_src: &str) -> Result<(), CedarError> {
         self.engine.write().load_policies(policy_src)
     }
-    
+
     /// Load policies from file
     pub fn load_policies_from_file(&self, path: &Path) -> Result<(), CedarError> {
         self.engine.write().load_policies_from_file(path)
     }
-    
+
     /// Load schema from string
     pub fn load_schema(&self, schema_src: &str) -> Result<(), CedarError> {
         self.engine.write().load_schema(schema_src)
     }
-    
+
     /// Get engine statistics
     pub fn stats(&self) -> CedarStats {
         self.engine.read().stats()
@@ -457,7 +468,7 @@ impl Policy for CedarPolicy {
     fn metadata(&self) -> &PolicyMetadata {
         &self.metadata
     }
-    
+
     async fn evaluate(&self, ctx: &PolicyContext) -> PolicyResult<Verdict> {
         self.engine
             .read()
@@ -477,10 +488,10 @@ fn create_entity_uid(
     // Cedar 4.x uses EntityTypeName::from_str which requires std::str::FromStr trait
     let type_name = EntityTypeName::from_str(&format!("{}::{}", namespace, entity_type))
         .map_err(|e| CedarError::EntityError(e.to_string()))?;
-    
+
     // EntityId::new is the Cedar 4.x API
     let eid = EntityId::new(entity_id);
-    
+
     Ok(EntityUid::from_type_name_and_id(type_name, eid))
 }
 
@@ -622,33 +633,30 @@ permit (
 
 /// Create a CedarPolicy with default Synapse configuration
 pub fn create_default_policy() -> Result<CedarPolicy, CedarError> {
-    let policy = CedarPolicy::with_config(
-        CedarConfig::new()
-            .with_namespace("Synapse")
-    )?;
-    
+    let policy = CedarPolicy::with_config(CedarConfig::new().with_namespace("Synapse"))?;
+
     // Load the default schema and policies
     policy.load_schema(SYNAPSE_CEDAR_SCHEMA)?;
     policy.load_policies(SYNAPSE_DEFAULT_POLICIES)?;
-    
+
     Ok(policy)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_cedar_engine_creation() {
         let config = CedarConfig::new();
         let engine = CedarEngine::new(config);
         assert!(engine.is_ok());
     }
-    
+
     #[test]
     fn test_load_policies() {
         let mut engine = CedarEngine::new(CedarConfig::new()).unwrap();
-        
+
         let policies = r#"
             permit (
                 principal,
@@ -656,11 +664,11 @@ mod tests {
                 resource
             );
         "#;
-        
+
         assert!(engine.load_policies(policies).is_ok());
         assert_eq!(engine.stats().policy_count, 1);
     }
-    
+
     #[test]
     fn test_load_synapse_defaults() {
         // Default policy creation may fail due to schema validation
@@ -679,12 +687,12 @@ mod tests {
             Err(e) => panic!("Unexpected error: {}", e),
         }
     }
-    
+
     #[tokio::test]
     async fn test_policy_evaluation() {
         // Create a simple engine without complex schema validation
         let mut engine = CedarEngine::new(CedarConfig::new()).unwrap();
-        
+
         // Load a simple permit-all policy for testing
         let policies = r#"
             permit (
@@ -694,11 +702,10 @@ mod tests {
             );
         "#;
         engine.load_policies(policies).unwrap();
-        
+
         // Create a test context
-        let ctx = PolicyContext::new(1, "agent-001")
-            .with_action("query");
-        
+        let ctx = PolicyContext::new(1, "agent-001").with_action("query");
+
         // Evaluate - should permit
         let result = engine.evaluate_context(&ctx);
         assert!(result.is_ok());

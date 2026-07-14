@@ -4,8 +4,7 @@ use std::time::SystemTime;
 use tokio::sync::RwLock;
 
 use syn_core::enterprise::{
-    EnterpriseContext, EnterpriseConfig,
-    TenantConfig, AuditConfig, RateLimitConfig, BackupConfig,
+    AuditConfig, BackupConfig, EnterpriseConfig, EnterpriseContext, RateLimitConfig, TenantConfig,
 };
 
 use crate::config::AdminConfig;
@@ -82,9 +81,9 @@ impl AppState {
             backup_enabled: true,
             backup_config: BackupConfig::default(),
         };
-        
+
         let enterprise = EnterpriseContext::new(enterprise_config).await;
-        
+
         // Initialize mock cluster nodes
         let nodes = vec![
             NodeInfo {
@@ -106,7 +105,7 @@ impl AppState {
                 last_heartbeat: SystemTime::now(),
             },
         ];
-        
+
         Ok(Self {
             config,
             enterprise,
@@ -115,7 +114,7 @@ impl AppState {
             started_at: SystemTime::now(),
         })
     }
-    
+
     /// Get server uptime in seconds.
     pub fn uptime_secs(&self) -> u64 {
         SystemTime::now()
@@ -123,14 +122,14 @@ impl AppState {
             .map(|d| d.as_secs())
             .unwrap_or(0)
     }
-    
+
     /// Format uptime as human-readable string.
     pub fn uptime_human(&self) -> String {
         let secs = self.uptime_secs();
         let days = secs / 86400;
         let hours = (secs % 86400) / 3600;
         let mins = (secs % 3600) / 60;
-        
+
         if days > 0 {
             format!("{}d {}h {}m", days, hours, mins)
         } else if hours > 0 {

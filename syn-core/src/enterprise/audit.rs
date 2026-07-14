@@ -2,8 +2,12 @@
 //!
 //! This module provides enterprise-grade audit logging with:
 //!
-//! - **Cryptographic Chain**: Each entry is hash-linked to the previous
-//! - **Digital Signatures**: Entries are signed for non-repudiation
+//! - **Cryptographic Chain**: Each entry is hash-linked to the previous using SHA-256
+//! - **Integrity Checksums**: Entries carry a checksum derived from the chain hash for
+//!   tamper-evidence. This is **not** a digital signature: there is no asymmetric key
+//!   material and no non-repudiation guarantee. A malicious actor with write access to
+//!   the chain can recompute the checksum after altering an entry. Real signing would
+//!   require a PKI / key-management story that does not exist yet.
 //! - **Compliance Ready**: SOC2, HIPAA, GDPR compatible
 //! - **Immutable Log**: Append-only with integrity verification
 //!
@@ -29,11 +33,16 @@
 //! └─────────────────────────────────────────────────────────────────┘
 //! ```
 
-use std::collections::VecDeque;
-use std::time::SystemTime;
-use tokio::sync::RwLock;
 use serde::{Deserialize, Serialize};
+use std::collections::VecDeque;
+use std::sync::Once;
+use std::time::SystemTime;
 use thiserror::Error;
+use tokio::sync::RwLock;
+
+/// Ensures the "no real signing" warning is only emitted once per process,
+/// no matter how many `AuditChain` instances are created.
+static SIGNING_WARNING: Once = Once::new();
 
 /// Severity level for audit events.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -135,37 +144,37 @@ impl AuditEvent {
             session_id: None,
         }
     }
-    
+
     /// Set severity level.
     pub fn with_severity(mut self, severity: AuditSeverity) -> Self {
         self.severity = severity;
         self
     }
-    
+
     /// Set tenant ID.
     pub fn with_tenant(mut self, tenant_id: impl Into<String>) -> Self {
         self.tenant_id = Some(tenant_id.into());
         self
     }
-    
+
     /// Set success status.
     pub fn with_success(mut self, success: bool) -> Self {
         self.success = success;
         self
     }
-    
+
     /// Set details.
     pub fn with_details(mut self, details: impl Into<String>) -> Self {
         self.details = Some(details.into());
         self
     }
-    
+
     /// Set client IP.
     pub fn with_client_ip(mut self, ip: impl Into<String>) -> Self {
         self.client_ip = Some(ip.into());
         self
     }
-    
+
     /// Set request ID.
     pub fn with_request_id(mut self, id: impl Into<String>) -> Self {
         self.request_id = Some(id.into());
@@ -186,25 +195,27 @@ pub struct AuditEntry {
     pub event: AuditEvent,
     /// SHA-256 hash of this entry
     pub hash: String,
-    /// Digital signature (placeholder - would use proper crypto)
+    /// Integrity checksum derived from the entry hash (NOT a cryptographic digital
+    /// signature - there is no asymmetric key involved, so this provides no
+    /// non-repudiation guarantee, only tamper-evidence via the hash chain).
     pub signature: String,
 }
 
 impl AuditEntry {
-    /// Compute the hash for this entry.
+    /// Compute the SHA-256 hash for this entry.
     fn compute_hash(&self) -> String {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-        
-        let mut hasher = DefaultHasher::new();
-        self.sequence.hash(&mut hasher);
-        format!("{:?}", self.timestamp).hash(&mut hasher);
-        self.prev_hash.hash(&mut hasher);
-        format!("{:?}", self.event).hash(&mut hasher);
-        
-        format!("{:016x}", hasher.finish())
+        use sha2::{Digest, Sha256};
+
+        let mut hasher = Sha256::new();
+        hasher.update(self.sequence.to_le_bytes());
+        hasher.update(format!("{:?}", self.timestamp).as_bytes());
+        hasher.update(self.prev_hash.as_bytes());
+        hasher.update(format!("{:?}", self.event).as_bytes());
+
+        let digest = hasher.finalize();
+        digest.iter().map(|b| format!("{:02x}", b)).collect()
     }
-    
+
     /// Verify the hash of this entry.
     pub fn verify_hash(&self) -> bool {
         self.hash == self.compute_hash()
@@ -244,19 +255,19 @@ pub enum AuditError {
     /// Chain integrity violation
     #[error("Audit chain integrity violation at sequence {0}")]
     IntegrityViolation(u64),
-    
+
     /// Signature verification failed
     #[error("Signature verification failed for entry {0}")]
     SignatureInvalid(u64),
-    
+
     /// Storage error
     #[error("Audit storage error: {0}")]
     StorageError(String),
-    
+
     /// Entry not found
     #[error("Audit entry not found: sequence {0}")]
     NotFound(u64),
-    
+
     /// Chain is locked
     #[error("Audit chain is locked")]
     Locked,
@@ -280,6 +291,14 @@ pub struct AuditChain {
 impl AuditChain {
     /// Create a new audit chain.
     pub fn new(config: AuditConfig) -> Self {
+        SIGNING_WARNING.call_once(|| {
+            tracing::warn!(
+                "AuditChain does not implement real cryptographic signing: entries carry a \
+                 SHA-256-derived integrity checksum (hash chaining) for tamper-evidence only. \
+                 There is no asymmetric key material and therefore no non-repudiation guarantee."
+            );
+        });
+
         Self {
             config,
             entries: RwLock::new(VecDeque::new()),
@@ -287,7 +306,7 @@ impl AuditChain {
             last_hash: RwLock::new(String::new()),
         }
     }
-    
+
     /// Record an audit event.
     pub async fn record(&self, event: AuditEvent) -> AuditResult<AuditEntry> {
         // Check severity filter
@@ -302,14 +321,14 @@ impl AuditChain {
                 signature: String::new(),
             });
         }
-        
+
         let mut sequence = self.sequence.write().await;
         let mut last_hash = self.last_hash.write().await;
         let mut entries = self.entries.write().await;
-        
+
         *sequence += 1;
         let seq = *sequence;
-        
+
         let mut entry = AuditEntry {
             sequence: seq,
             timestamp: SystemTime::now(),
@@ -318,141 +337,133 @@ impl AuditChain {
             hash: String::new(),
             signature: String::new(),
         };
-        
+
         // Compute hash
         entry.hash = entry.compute_hash();
-        
-        // Sign (placeholder - would use proper PKI)
+
+        // Integrity checksum derived from the hash (NOT a real cryptographic signature -
+        // see the AuditChain::new warning and module docs for details).
         entry.signature = format!("sig:{}", entry.hash);
-        
+
         // Update chain state
         *last_hash = entry.hash.clone();
-        
+
         // Add to in-memory buffer
         entries.push_back(entry.clone());
-        
+
         // Trim if needed
         while entries.len() > self.config.max_memory_entries {
             entries.pop_front();
         }
-        
+
         Ok(entry)
     }
-    
+
     /// Verify the integrity of the entire chain.
     pub async fn verify_integrity(&self) -> AuditResult<bool> {
         let entries = self.entries.read().await;
-        
+
         let mut prev_hash = String::new();
-        
+
         for entry in entries.iter() {
             // Verify hash
             if !entry.verify_hash() {
                 return Err(AuditError::IntegrityViolation(entry.sequence));
             }
-            
+
             // Verify chain linkage
             if entry.prev_hash != prev_hash {
                 return Err(AuditError::IntegrityViolation(entry.sequence));
             }
-            
+
             prev_hash = entry.hash.clone();
         }
-        
+
         Ok(true)
     }
-    
+
     /// Get an entry by sequence number.
     pub async fn get_entry(&self, sequence: u64) -> AuditResult<AuditEntry> {
         let entries = self.entries.read().await;
-        
+
         entries
             .iter()
             .find(|e| e.sequence == sequence)
             .cloned()
             .ok_or(AuditError::NotFound(sequence))
     }
-    
+
     /// Query entries by time range.
-    pub async fn query_by_time(
-        &self,
-        start: SystemTime,
-        end: SystemTime,
-    ) -> Vec<AuditEntry> {
+    pub async fn query_by_time(&self, start: SystemTime, end: SystemTime) -> Vec<AuditEntry> {
         let entries = self.entries.read().await;
-        
+
         entries
             .iter()
             .filter(|e| e.timestamp >= start && e.timestamp <= end)
             .cloned()
             .collect()
     }
-    
+
     /// Query entries by category.
     pub async fn query_by_category(&self, category: &AuditCategory) -> Vec<AuditEntry> {
         let entries = self.entries.read().await;
-        
+
         entries
             .iter()
             .filter(|e| &e.event.category == category)
             .cloned()
             .collect()
     }
-    
+
     /// Query entries by actor.
     pub async fn query_by_actor(&self, actor: &str) -> Vec<AuditEntry> {
         let entries = self.entries.read().await;
-        
+
         entries
             .iter()
             .filter(|e| e.event.actor == actor)
             .cloned()
             .collect()
     }
-    
+
     /// Query entries by tenant.
     pub async fn query_by_tenant(&self, tenant_id: &str) -> Vec<AuditEntry> {
         let entries = self.entries.read().await;
-        
+
         entries
             .iter()
             .filter(|e| e.event.tenant_id.as_deref() == Some(tenant_id))
             .cloned()
             .collect()
     }
-    
+
     /// Get recent entries.
     pub async fn recent(&self, count: usize) -> Vec<AuditEntry> {
         let entries = self.entries.read().await;
-        
-        entries
-            .iter()
-            .rev()
-            .take(count)
-            .cloned()
-            .collect()
+
+        entries.iter().rev().take(count).cloned().collect()
     }
-    
+
     /// Get the current chain length.
     pub async fn len(&self) -> usize {
         let entries = self.entries.read().await;
         entries.len()
     }
-    
+
     /// Check if chain is empty.
     pub async fn is_empty(&self) -> bool {
         let entries = self.entries.read().await;
         entries.is_empty()
     }
-    
+
     /// Get chain statistics.
     pub async fn stats(&self) -> AuditChainStats {
         let entries = self.entries.read().await;
         let sequence = *self.sequence.read().await;
-        
+
         let mut by_category = std::collections::HashMap::new();
         let mut by_severity = std::collections::HashMap::new();
-        
+
         for entry in entries.iter() {
             *by_category
                 .entry(format!("{:?}", entry.event.category))
@@ -461,7 +472,7 @@ impl AuditChain {
                 .entry(format!("{:?}", entry.event.severity))
                 .or_insert(0u64) += 1;
         }
-        
+
         AuditChainStats {
             total_entries: sequence,
             in_memory_entries: entries.len() as u64,
@@ -469,44 +480,39 @@ impl AuditChain {
             by_severity,
         }
     }
-    
+
     /// List all entries with pagination.
     pub async fn list_entries(&self, offset: usize, limit: usize) -> Vec<AuditEntry> {
         let entries = self.entries.read().await;
-        
-        entries
-            .iter()
-            .skip(offset)
-            .take(limit)
-            .cloned()
-            .collect()
+
+        entries.iter().skip(offset).take(limit).cloned().collect()
     }
-    
+
     /// Verify the integrity of the entire chain.
     /// Returns Ok(true) if chain is valid, Ok(false) if corrupted.
     pub async fn verify_chain(&self) -> crate::Result<bool> {
         let entries = self.entries.read().await;
-        
+
         if entries.is_empty() {
             return Ok(true);
         }
-        
+
         // Verify each entry's hash chain
         for i in 1..entries.len() {
             let prev = &entries[i - 1];
             let curr = &entries[i];
-            
+
             // Verify hash linkage
             if curr.prev_hash != prev.hash {
                 return Ok(false);
             }
-            
+
             // Verify sequence numbers
             if curr.sequence != prev.sequence + 1 {
                 return Ok(false);
             }
         }
-        
+
         Ok(true)
     }
 }
@@ -535,23 +541,22 @@ pub fn auth_event(actor: &str, success: bool, details: Option<&str>) -> AuditEve
         "session",
     )
     .with_success(success)
-    .with_severity(if success { AuditSeverity::Info } else { AuditSeverity::Warning });
-    
+    .with_severity(if success {
+        AuditSeverity::Info
+    } else {
+        AuditSeverity::Warning
+    });
+
     if let Some(d) = details {
         event = event.with_details(d);
     }
-    
+
     event
 }
 
 /// Log a data access event.
 pub fn data_access_event(actor: &str, resource: &str, action: &str) -> AuditEvent {
-    AuditEvent::new(
-        AuditCategory::DataAccess,
-        action,
-        actor,
-        resource,
-    )
+    AuditEvent::new(AuditCategory::DataAccess, action, actor, resource)
 }
 
 /// Log a security event.
@@ -561,42 +566,41 @@ pub fn security_event(
     resource: &str,
     severity: AuditSeverity,
 ) -> AuditEvent {
-    AuditEvent::new(AuditCategory::Security, action, actor, resource)
-        .with_severity(severity)
+    AuditEvent::new(AuditCategory::Security, action, actor, resource).with_severity(severity)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[tokio::test]
     async fn test_audit_chain_creation() {
         let chain = AuditChain::new(AuditConfig::default());
         assert!(chain.is_empty().await);
     }
-    
+
     #[tokio::test]
     async fn test_record_event() {
         let chain = AuditChain::new(AuditConfig::default());
-        
+
         let event = AuditEvent::new(
             AuditCategory::Authentication,
             "login",
             "user@example.com",
             "session",
         );
-        
+
         let entry = chain.record(event).await.unwrap();
-        
+
         assert_eq!(entry.sequence, 1);
         assert!(!entry.hash.is_empty());
         assert!(entry.verify_hash());
     }
-    
+
     #[tokio::test]
     async fn test_chain_integrity() {
         let chain = AuditChain::new(AuditConfig::default());
-        
+
         // Record multiple events
         for i in 0..10 {
             let event = AuditEvent::new(
@@ -607,49 +611,39 @@ mod tests {
             );
             chain.record(event).await.unwrap();
         }
-        
+
         // Verify integrity
         assert!(chain.verify_integrity().await.unwrap());
     }
-    
+
     #[tokio::test]
     async fn test_query_by_actor() {
         let chain = AuditChain::new(AuditConfig::default());
-        
-        let event1 = AuditEvent::new(
-            AuditCategory::DataAccess,
-            "read",
-            "alice",
-            "doc1",
-        );
-        let event2 = AuditEvent::new(
-            AuditCategory::DataAccess,
-            "write",
-            "bob",
-            "doc2",
-        );
-        let event3 = AuditEvent::new(
-            AuditCategory::DataAccess,
-            "read",
-            "alice",
-            "doc3",
-        );
-        
+
+        let event1 = AuditEvent::new(AuditCategory::DataAccess, "read", "alice", "doc1");
+        let event2 = AuditEvent::new(AuditCategory::DataAccess, "write", "bob", "doc2");
+        let event3 = AuditEvent::new(AuditCategory::DataAccess, "read", "alice", "doc3");
+
         chain.record(event1).await.unwrap();
         chain.record(event2).await.unwrap();
         chain.record(event3).await.unwrap();
-        
+
         let alice_events = chain.query_by_actor("alice").await;
         assert_eq!(alice_events.len(), 2);
     }
-    
+
     #[tokio::test]
     async fn test_convenience_functions() {
         let event = auth_event("user@test.com", true, Some("MFA verified"));
         assert_eq!(event.category, AuditCategory::Authentication);
         assert!(event.success);
-        
-        let event = security_event("intrusion_attempt", "unknown", "firewall", AuditSeverity::Critical);
+
+        let event = security_event(
+            "intrusion_attempt",
+            "unknown",
+            "firewall",
+            AuditSeverity::Critical,
+        );
         assert_eq!(event.severity, AuditSeverity::Critical);
     }
 }

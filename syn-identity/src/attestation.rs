@@ -135,4 +135,3 @@ mod tests {
         assert_eq!(attrs.executable, "/usr/bin/test");
     }
 }
-

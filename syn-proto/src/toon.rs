@@ -38,7 +38,11 @@ use thiserror::Error;
 pub enum ToonError {
     /// Invalid indentation level.
     #[error("Invalid indentation at line {line}: expected {expected}, got {actual}")]
-    InvalidIndentation { line: usize, expected: usize, actual: usize },
+    InvalidIndentation {
+        line: usize,
+        expected: usize,
+        actual: usize,
+    },
 
     /// Missing required header (e.g., `users2{id,name}:`).
     #[error("Missing or invalid header at line {line}: {message}")]
@@ -58,7 +62,11 @@ pub enum ToonError {
 
     /// Invalid column count in row.
     #[error("Invalid column count in row {row}: expected {expected}, got {actual}")]
-    InvalidColumnCount { row: usize, expected: usize, actual: usize },
+    InvalidColumnCount {
+        row: usize,
+        expected: usize,
+        actual: usize,
+    },
 }
 
 /// Result type for TOON operations.
@@ -98,7 +106,7 @@ impl ToonSchema {
     /// Returns an error if the header format is invalid.
     pub fn parse_header(header: &str) -> ToonResult<Self> {
         let header = header.trim();
-        
+
         // Must end with ':'
         if !header.ends_with(':') {
             return Err(ToonError::InvalidHeader {
@@ -129,7 +137,7 @@ impl ToonSchema {
         };
 
         let columns_str = &columns_part[..close_brace];
-        
+
         // Extract row count from name (if present)
         let (name, row_count) = if let Some(last_char) = name_part.chars().last() {
             if last_char.is_ascii_digit() {
@@ -142,12 +150,12 @@ impl ToonSchema {
                         break;
                     }
                 }
-                
+
                 if split_pos < name_part.len() {
                     let name = name_part[..split_pos].to_string();
                     let count_str = &name_part[split_pos..];
-                    let row_count: usize = count_str.parse()
-                        .map_err(|_| ToonError::InvalidRowCount {
+                    let row_count: usize =
+                        count_str.parse().map_err(|_| ToonError::InvalidRowCount {
                             line: 0,
                             count: count_str.to_string(),
                         })?;
@@ -166,7 +174,10 @@ impl ToonSchema {
         let columns: Vec<String> = if columns_str.is_empty() {
             Vec::new()
         } else {
-            columns_str.split(',').map(|s| s.trim().to_string()).collect()
+            columns_str
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .collect()
         };
 
         Ok(Self {
@@ -180,16 +191,14 @@ impl ToonSchema {
     #[must_use]
     pub fn to_header(&self) -> String {
         if self.row_count > 0 {
-            format!("{}{}{{{}}}:", 
-                self.name, 
+            format!(
+                "{}{}{{{}}}:",
+                self.name,
                 self.row_count,
                 self.columns.join(",")
             )
         } else {
-            format!("{}{{{}}}:", 
-                self.name,
-                self.columns.join(",")
-            )
+            format!("{}{{{}}}:", self.name, self.columns.join(","))
         }
     }
 }
@@ -220,15 +229,21 @@ impl ToonParser {
     pub fn parse_array(&mut self) -> ToonResult<(ToonSchema, Vec<Vec<String>>)> {
         // Parse header
         let header_line = self.next_line()?;
+        // Measure the header's own indentation (normally 0) *before* parsing
+        // any rows. Rows must be indented deeper than this to belong to the
+        // array; using the first row's indentation here (as a previous
+        // version of this code did) made `indent <= base_indent` true on
+        // that very first row, breaking out of the loop immediately and
+        // silently producing zero rows for every input.
+        let base_indent = self.measure_indent(&header_line);
         let schema = ToonSchema::parse_header(&header_line)?;
 
         // Parse rows
         let mut rows = Vec::new();
-        let base_indent = self.current_indent()?;
 
         while let Some(line) = self.peek_line() {
             let indent = self.measure_indent(line);
-            
+
             // Stop if we've gone back to base indent or less
             if indent <= base_indent && !line.trim().is_empty() {
                 break;
@@ -241,8 +256,12 @@ impl ToonParser {
             }
 
             // Parse row data
-            let row_data: Vec<String> = line.trim().split_whitespace().map(|s| s.to_string()).collect();
-            
+            let row_data: Vec<String> = line
+                .trim()
+                .split_whitespace()
+                .map(|s| s.to_string())
+                .collect();
+
             if row_data.len() != schema.columns.len() {
                 return Err(ToonError::InvalidColumnCount {
                     row: rows.len() + 1,
@@ -323,11 +342,7 @@ impl ToonSerializer {
     /// # Errors
     ///
     /// Returns an error if row data doesn't match the schema.
-    pub fn serialize_array(
-        &mut self,
-        schema: &ToonSchema,
-        rows: &[Vec<String>],
-    ) -> ToonResult<()> {
+    pub fn serialize_array(&mut self, schema: &ToonSchema, rows: &[Vec<String>]) -> ToonResult<()> {
         // Validate row count
         if schema.row_count > 0 && rows.len() != schema.row_count {
             return Err(ToonError::RowCountMismatch {
@@ -347,7 +362,7 @@ impl ToonSerializer {
         // Write rows with indentation
         self.indent_level += 2;
         let indent = " ".repeat(self.indent_level);
-        
+
         for row in rows {
             if row.len() != schema.columns.len() {
                 return Err(ToonError::InvalidColumnCount {
@@ -356,7 +371,7 @@ impl ToonSerializer {
                     actual: row.len(),
                 });
             }
-            
+
             self.output.push_str(&indent);
             self.output.push_str(&row.join(" "));
             self.output.push('\n');
@@ -381,16 +396,162 @@ impl Default for ToonSerializer {
 
 /// Converts a Serde-serializable type to TOON format.
 ///
-/// This is a simplified converter that works with basic types.
-/// For complex nested structures, consider using schema generation.
+/// This is a simplified converter that works with basic types: it supports
+/// values that serialize to either
+///
+/// - a bare JSON array of flat objects (e.g. `Vec<Row>`), or
+/// - a JSON object with exactly one field whose value is an array of flat
+///   objects (e.g. `{"users": [...]}`) - the field name becomes the TOON
+///   array name.
+///
+/// Each row object must have the same set of scalar (non-array, non-object)
+/// fields; those fields become the TOON columns, in the order they appear
+/// after serialization. Column values must not themselves contain whitespace,
+/// since TOON rows are whitespace-delimited.
+///
+/// For complex nested structures, consider using [`ToonSchema`] and
+/// [`ToonSerializer`] directly, which give full control over column
+/// selection and row formatting.
+///
+/// # Errors
+///
+/// Returns an error if:
+/// - `value` doesn't serialize to a supported shape (see above),
+/// - rows have inconsistent fields, or
+/// - a field value is not a flat scalar, or a string value contains
+///   whitespace.
 pub fn to_toon<T: serde::Serialize>(value: &T) -> ToonResult<String> {
-    // For now, this is a placeholder. Full implementation would
-    // need to traverse the Serde structure and generate appropriate TOON.
-    // This is a complex operation that would require custom serialization.
-    Err(ToonError::InvalidHeader {
+    use serde_json::Value;
+
+    let json = serde_json::to_value(value).map_err(|e| ToonError::InvalidHeader {
         line: 0,
-        message: "Direct Serde-to-TOON conversion not yet implemented. Use ToonSerializer directly.".to_string(),
-    })
+        message: format!("failed to serialize value to an intermediate JSON form: {e}"),
+    })?;
+
+    // Determine the array name and the underlying row array.
+    let (name, rows_value): (String, Value) = match json {
+        Value::Array(_) => ("items".to_string(), json),
+        Value::Object(ref map) if map.len() == 1 => {
+            let (key, val) = map.iter().next().expect("map.len() == 1");
+            if val.is_array() {
+                let key = key.clone();
+                let val = val.clone();
+                (key, val)
+            } else {
+                return Err(unsupported_shape_error());
+            }
+        }
+        _ => return Err(unsupported_shape_error()),
+    };
+
+    let rows_array = rows_value.as_array().expect("checked above");
+
+    if rows_array.is_empty() {
+        let schema = ToonSchema::new(name, 0, Vec::new());
+        return Ok(format!("{}\n", schema.to_header()));
+    }
+
+    // Columns are derived from the keys of the first row.
+    let columns: Vec<String> = match &rows_array[0] {
+        Value::Object(map) => map.keys().cloned().collect(),
+        other => {
+            return Err(ToonError::InvalidHeader {
+                line: 0,
+                message: format!(
+                    "to_toon only supports arrays of flat objects; row 0 was {}",
+                    value_kind(other)
+                ),
+            })
+        }
+    };
+
+    let mut rows: Vec<Vec<String>> = Vec::with_capacity(rows_array.len());
+    for (idx, row_value) in rows_array.iter().enumerate() {
+        let Value::Object(map) = row_value else {
+            return Err(ToonError::InvalidHeader {
+                line: 0,
+                message: format!(
+                    "to_toon only supports arrays of flat objects; row {idx} was {}",
+                    value_kind(&row_value)
+                ),
+            });
+        };
+
+        if map.len() != columns.len() {
+            return Err(ToonError::InvalidColumnCount {
+                row: idx + 1,
+                expected: columns.len(),
+                actual: map.len(),
+            });
+        }
+
+        let mut row = Vec::with_capacity(columns.len());
+        for col in &columns {
+            let field = map.get(col).ok_or_else(|| ToonError::InvalidHeader {
+                line: 0,
+                message: format!("row {idx} is missing field '{col}' present in row 0"),
+            })?;
+            row.push(scalar_to_token(field)?);
+        }
+        rows.push(row);
+    }
+
+    let schema = ToonSchema::new(name, rows.len(), columns);
+    let mut serializer = ToonSerializer::new();
+    serializer.serialize_array(&schema, &rows)?;
+    Ok(serializer.into_string())
+}
+
+fn unsupported_shape_error() -> ToonError {
+    ToonError::InvalidHeader {
+        line: 0,
+        message: "to_toon only supports a bare array of flat objects, or a single-field object \
+                   whose value is an array of flat objects"
+            .to_string(),
+    }
+}
+
+/// Converts a flat scalar JSON value into a single whitespace-free TOON token.
+fn scalar_to_token(value: &serde_json::Value) -> ToonResult<String> {
+    use serde_json::Value;
+
+    match value {
+        Value::Null => Ok("null".to_string()),
+        Value::Bool(b) => Ok(b.to_string()),
+        Value::Number(n) => Ok(n.to_string()),
+        Value::String(s) => {
+            if s.chars().any(char::is_whitespace) {
+                Err(ToonError::InvalidHeader {
+                    line: 0,
+                    message: format!(
+                        "to_toon cannot represent string value '{s}' containing whitespace; \
+                         TOON rows are whitespace-delimited"
+                    ),
+                })
+            } else {
+                Ok(s.clone())
+            }
+        }
+        Value::Array(_) | Value::Object(_) => Err(ToonError::InvalidHeader {
+            line: 0,
+            message: "to_toon only supports flat scalar fields; nested arrays/objects are not \
+                       supported"
+                .to_string(),
+        }),
+    }
+}
+
+fn value_kind(value: &serde_json::Value) -> &'static str {
+    use serde_json::Value;
+
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "a bool",
+        Value::Number(_) => "a number",
+        Value::String(_) => "a string",
+        Value::Array(_) => "an array",
+        Value::Object(_) => "an object",
+    }
 }
 
 #[cfg(test)]
@@ -424,7 +585,7 @@ mod tests {
         let toon = "users2{id,name}:\n  1 Alice\n  2 Bob\n";
         let mut parser = ToonParser::new(toon);
         let (schema, rows) = parser.parse_array().unwrap();
-        
+
         assert_eq!(schema.name, "users");
         assert_eq!(schema.row_count, 2);
         assert_eq!(rows.len(), 2);
@@ -454,7 +615,83 @@ mod tests {
         let toon = "users2{id,name}:\n  1 Alice\n";
         let mut parser = ToonParser::new(toon);
         let result = parser.parse_array();
-        assert!(matches!(result, Err(ToonError::RowCountMismatch { expected: 2, actual: 1 })));
+        assert!(matches!(
+            result,
+            Err(ToonError::RowCountMismatch {
+                expected: 2,
+                actual: 1
+            })
+        ));
+    }
+
+    #[derive(serde::Serialize)]
+    struct User {
+        id: u32,
+        name: String,
+    }
+
+    #[derive(serde::Serialize)]
+    struct Users {
+        users: Vec<User>,
+    }
+
+    #[test]
+    fn to_toon_wrapped_object_round_trips() {
+        let payload = Users {
+            users: vec![
+                User {
+                    id: 1,
+                    name: "Alice".to_string(),
+                },
+                User {
+                    id: 2,
+                    name: "Bob".to_string(),
+                },
+            ],
+        };
+
+        let toon = to_toon(&payload).unwrap();
+        assert!(toon.starts_with("users2{id,name}:"));
+
+        let mut parser = ToonParser::new(&toon);
+        let (schema, rows) = parser.parse_array().unwrap();
+        assert_eq!(schema.name, "users");
+        assert_eq!(schema.row_count, 2);
+        assert_eq!(schema.columns, vec!["id", "name"]);
+        assert_eq!(rows[0], vec!["1", "Alice"]);
+        assert_eq!(rows[1], vec!["2", "Bob"]);
+    }
+
+    #[test]
+    fn to_toon_bare_array_uses_default_name() {
+        let payload = vec![User {
+            id: 1,
+            name: "Alice".to_string(),
+        }];
+
+        let toon = to_toon(&payload).unwrap();
+        let mut parser = ToonParser::new(&toon);
+        let (schema, rows) = parser.parse_array().unwrap();
+        assert_eq!(schema.name, "items");
+        assert_eq!(rows[0], vec!["1", "Alice"]);
+    }
+
+    #[test]
+    fn to_toon_rejects_whitespace_in_values() {
+        let payload = Users {
+            users: vec![User {
+                id: 1,
+                name: "Alice Smith".to_string(),
+            }],
+        };
+
+        let result = to_toon(&payload);
+        assert!(matches!(result, Err(ToonError::InvalidHeader { .. })));
+    }
+
+    #[test]
+    fn to_toon_rejects_unsupported_shape() {
+        let result = to_toon(&42u32);
+        assert!(matches!(result, Err(ToonError::InvalidHeader { .. })));
     }
 }
-

@@ -36,7 +36,7 @@ pub enum AdapterError {
     /// Deserialization error.
     #[error("Deserialization error: {0}")]
     Deserialization(String),
-    
+
     /// IO error.
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
@@ -197,9 +197,10 @@ impl AdapterFactory {
             "http3" => Ok(Box::new(Http3Adapter::new(protocol))),
             "mcp" => Ok(Box::new(McpAdapter::new())),
             "a2a" => Ok(Box::new(A2aAdapter::new())),
-            _ => Err(AdapterError::UnsupportedProtocol(
-                format!("Unsupported transport: {}", transport),
-            )),
+            _ => Err(AdapterError::UnsupportedProtocol(format!(
+                "Unsupported transport: {}",
+                transport
+            ))),
         }
     }
 }
@@ -306,14 +307,12 @@ impl McpAdapter {
                     }),
                 },
             ],
-            resources: vec![
-                McpResource {
-                    uri: "synapse://events/recent".to_string(),
-                    name: "Recent Events".to_string(),
-                    description: "List of recent events in the system".to_string(),
-                    mime_type: Some("application/json".to_string()),
-                },
-            ],
+            resources: vec![McpResource {
+                uri: "synapse://events/recent".to_string(),
+                name: "Recent Events".to_string(),
+                description: "List of recent events in the system".to_string(),
+                mime_type: Some("application/json".to_string()),
+            }],
         }
     }
 
@@ -350,13 +349,17 @@ impl McpAdapter {
 
     /// Handle list_tools request.
     pub fn handle_list_tools(&self) -> serde_json::Value {
-        let tools: Vec<serde_json::Value> = self.tools.iter().map(|t| {
-            serde_json::json!({
-                "name": t.name,
-                "description": t.description,
-                "input_schema": t.input_schema
+        let tools: Vec<serde_json::Value> = self
+            .tools
+            .iter()
+            .map(|t| {
+                serde_json::json!({
+                    "name": t.name,
+                    "description": t.description,
+                    "input_schema": t.input_schema
+                })
             })
-        }).collect();
+            .collect();
 
         serde_json::json!({
             "type": "list_tools_result",
@@ -366,14 +369,18 @@ impl McpAdapter {
 
     /// Handle list_resources request.
     pub fn handle_list_resources(&self) -> serde_json::Value {
-        let resources: Vec<serde_json::Value> = self.resources.iter().map(|r| {
-            serde_json::json!({
-                "uri": r.uri,
-                "name": r.name,
-                "description": r.description,
-                "mime_type": r.mime_type
+        let resources: Vec<serde_json::Value> = self
+            .resources
+            .iter()
+            .map(|r| {
+                serde_json::json!({
+                    "uri": r.uri,
+                    "name": r.name,
+                    "description": r.description,
+                    "mime_type": r.mime_type
+                })
             })
-        }).collect();
+            .collect();
 
         serde_json::json!({
             "type": "list_resources_result",
@@ -387,7 +394,8 @@ impl McpAdapter {
         let msg: serde_json::Value = serde_json::from_slice(message)
             .map_err(|e| AdapterError::Deserialization(e.to_string()))?;
 
-        let msg_type = msg.get("type")
+        let msg_type = msg
+            .get("type")
             .and_then(|v| v.as_str())
             .unwrap_or("unknown");
 
@@ -398,35 +406,31 @@ impl McpAdapter {
                 msg.get("client_info")
                     .map(|v| v.to_string())
                     .as_deref()
-                    .unwrap_or("")
+                    .unwrap_or(""),
             ),
             "list_tools" => self.handle_list_tools(),
             "list_resources" => self.handle_list_resources(),
             "call_tool" => {
                 // Extract tool name and arguments
-                let name = msg.get("name")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                let args = msg.get("arguments")
+                let name = msg.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                let args = msg
+                    .get("arguments")
                     .cloned()
                     .unwrap_or(serde_json::Value::Null);
-                
+
                 self.handle_call_tool(name, args)
-            },
+            }
             "read_resource" => {
-                let uri = msg.get("uri")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
+                let uri = msg.get("uri").and_then(|v| v.as_str()).unwrap_or("");
                 self.handle_read_resource(uri)
-            },
+            }
             _ => serde_json::json!({
                 "type": "error",
                 "error": format!("Unknown message type: {}", msg_type)
             }),
         };
 
-        serde_json::to_vec(&response)
-            .map_err(|e| AdapterError::Serialization(e.to_string()))
+        serde_json::to_vec(&response).map_err(|e| AdapterError::Serialization(e.to_string()))
     }
 
     /// Handle call_tool request.
@@ -435,38 +439,42 @@ impl McpAdapter {
 
         match name {
             "recall" => {
-                let query = args.get("query")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                let limit = args.get("limit")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(10) as usize;
+                let query = args.get("query").and_then(|v| v.as_str()).unwrap_or("");
+                let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
 
                 // TODO: Connect to actual vector memory
                 serde_json::json!({
                     "type": "call_tool_result",
                     "content": [{
                         "type": "text",
-                        "text": format!("Searched for '{}' (limit {}). No results in stub.", query, limit)
+                        "text": format!(
+                            "Tool 'recall' is not available: vector memory backend is not connected yet (query: '{}', limit: {})",
+                            query, limit
+                        )
                     }],
-                    "is_error": false
+                    "is_error": true
                 })
-            },
+            }
             "store" => {
-                let content = args.get("content")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
+                let content = args.get("content").and_then(|v| v.as_str()).unwrap_or("");
+                // Char-boundary-safe truncation: slicing a `&str` by raw byte
+                // index panics if the index lands mid-character, so collect
+                // the first N chars instead of indexing bytes directly.
+                let preview: String = content.chars().take(50).collect();
 
                 // TODO: Connect to actual vector memory
                 serde_json::json!({
                     "type": "call_tool_result",
                     "content": [{
                         "type": "text",
-                        "text": format!("Stored: '{}' (stub)", &content[..content.len().min(50)])
+                        "text": format!(
+                            "Tool 'store' is not available: vector memory backend is not connected yet (content preview: '{}')",
+                            preview
+                        )
                     }],
-                    "is_error": false
+                    "is_error": true
                 })
-            },
+            }
             _ => serde_json::json!({
                 "type": "call_tool_result",
                 "content": [{
@@ -484,11 +492,8 @@ impl McpAdapter {
 
         // TODO: Connect to actual resources
         serde_json::json!({
-            "type": "read_resource_result",
-            "contents": [{
-                "type": "text",
-                "text": format!("Resource at {} (stub)", uri)
-            }]
+            "type": "error",
+            "error": format!("Resource '{}' is not available: resource backend is not connected yet", uri)
         })
     }
 }
@@ -608,13 +613,17 @@ impl A2aAdapter {
 
     /// Handle capability advertisement.
     pub fn handle_capability_advertisement(&self) -> serde_json::Value {
-        let caps: Vec<serde_json::Value> = self.capabilities.iter().map(|c| {
-            serde_json::json!({
-                "name": c.name,
-                "description": c.description,
-                "version": c.version
+        let caps: Vec<serde_json::Value> = self
+            .capabilities
+            .iter()
+            .map(|c| {
+                serde_json::json!({
+                    "name": c.name,
+                    "description": c.description,
+                    "version": c.version
+                })
             })
-        }).collect();
+            .collect();
 
         serde_json::json!({
             "type": "capability_advertisement",
@@ -624,18 +633,22 @@ impl A2aAdapter {
 
     /// Handle task delegation.
     pub async fn handle_delegate_task(&self, task: serde_json::Value) -> serde_json::Value {
-        let task_id = task.get("task_id")
+        let task_id = task
+            .get("task_id")
             .and_then(|v| v.as_str())
             .unwrap_or(&uuid_simple())
             .to_string();
 
         // Accept the task
         let mut tasks = self.tasks.write().await;
-        tasks.insert(task_id.clone(), A2aTaskState {
-            task_id: task_id.clone(),
-            status: "accepted".to_string(),
-            progress: 0,
-        });
+        tasks.insert(
+            task_id.clone(),
+            A2aTaskState {
+                task_id: task_id.clone(),
+                status: "accepted".to_string(),
+                progress: 0,
+            },
+        );
 
         serde_json::json!({
             "type": "delegate_task_response",
@@ -650,7 +663,8 @@ impl A2aAdapter {
         let msg: serde_json::Value = serde_json::from_slice(message)
             .map_err(|e| AdapterError::Deserialization(e.to_string()))?;
 
-        let msg_type = msg.get("type")
+        let msg_type = msg
+            .get("type")
             .and_then(|v| v.as_str())
             .unwrap_or("unknown");
 
@@ -662,39 +676,46 @@ impl A2aAdapter {
             "delegate_task" => {
                 let task = msg.get("task").cloned().unwrap_or(serde_json::Value::Null);
                 self.handle_delegate_task(task).await
-            },
+            }
             "heartbeat" => serde_json::json!({
                 "type": "heartbeat_response"
             }),
             "invoke_capability" => {
-                let capability = msg.get("capability")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                let params = msg.get("params").cloned().unwrap_or(serde_json::Value::Null);
-                
+                let capability = msg.get("capability").and_then(|v| v.as_str()).unwrap_or("");
+                let params = msg
+                    .get("params")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null);
+
                 self.handle_invoke_capability(capability, params)
-            },
+            }
             _ => serde_json::json!({
                 "type": "error",
                 "error": format!("Unknown message type: {}", msg_type)
             }),
         };
 
-        serde_json::to_vec(&response)
-            .map_err(|e| AdapterError::Serialization(e.to_string()))
+        serde_json::to_vec(&response).map_err(|e| AdapterError::Serialization(e.to_string()))
     }
 
     /// Handle capability invocation.
-    fn handle_invoke_capability(&self, capability: &str, params: serde_json::Value) -> serde_json::Value {
-        debug!("Invoking capability: {} with params: {:?}", capability, params);
+    fn handle_invoke_capability(
+        &self,
+        capability: &str,
+        params: serde_json::Value,
+    ) -> serde_json::Value {
+        debug!(
+            "Invoking capability: {} with params: {:?}",
+            capability, params
+        );
 
         // TODO: Connect to actual capability implementations
         serde_json::json!({
             "type": "invoke_capability_response",
             "result": {
-                "message": format!("Capability '{}' invoked (stub)", capability)
+                "message": format!("Capability '{}' is not available: capability backend is not connected yet", capability)
             },
-            "success": true
+            "success": false
         })
     }
 }
@@ -750,4 +771,3 @@ mod tests {
         assert_eq!(Protocol::Custom("custom").as_str(), "custom");
     }
 }
-

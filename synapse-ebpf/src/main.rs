@@ -40,6 +40,17 @@
 //! - No stack overflow (limited to 512 bytes)
 //!
 //! Despite this, we use `unsafe` for raw pointer operations required by eBPF.
+//!
+//! # Known limitations (not fixed in this pass)
+//!
+//! This file cannot be built or tested without a Linux kernel, so the
+//! following known gaps are documented rather than silently left in place:
+//! (a) the `task_alloc` LSM hook reads the *calling* (parent) task's PID via
+//! `bpf_get_current_pid_tgid()` instead of the newly-allocated child task's
+//! PID, so trust does not actually propagate across fork/clone as intended;
+//! (b) the `ALLOWED_HASHES` binary-hash map is populated but never consulted
+//! by any BPF program in this file; (c) all four hooks fail open (allow) on
+//! internal error.
 
 #![no_std]
 #![no_main]

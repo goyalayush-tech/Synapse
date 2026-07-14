@@ -121,12 +121,8 @@ mod tests {
 
     #[test]
     fn kprobe_program_creation() {
-        let program = KprobeProgram::new(
-            "test_probe",
-            "do_sys_open",
-            vec![0x01, 0x02, 0x03],
-            false,
-        );
+        let program =
+            KprobeProgram::new("test_probe", "do_sys_open", vec![0x01, 0x02, 0x03], false);
         assert_eq!(program.name, "test_probe");
         assert_eq!(program.function, "do_sys_open");
         assert!(!program.is_return_probe);
@@ -140,4 +136,3 @@ mod tests {
         assert_eq!(stats.avg_latency_ns(), 100);
     }
 }
-
